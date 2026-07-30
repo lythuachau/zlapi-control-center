@@ -189,6 +189,9 @@
   const gifSearch = $("#chat-gif-search");
   const gifStatus = $("#chat-gif-status");
   const gifSaveLibrary = $("#chat-gif-save-library");
+  const gifGiphyForm = $("#chat-giphy-import");
+  const gifGiphyUrl = $("#chat-giphy-url");
+  const gifGiphyButton = gifGiphyForm?.querySelector("button");
   const richContactSearch = $("#chat-rich-contact-search");
   const richContactList = $("#chat-rich-contact-list");
   const gifInput = $("#chat-gif-input");
@@ -738,7 +741,7 @@
     setRichStatus(
       {
         sticker: "Chọn một sticker để xem trước.",
-        gif: "Chọn GIF trong thư viện hoặc thêm tệp mới từ máy.",
+        gif: "Chọn GIF trong thư viện, tải từ máy hoặc dán link Giphy.",
         link: "Nhập URL để tạo thẻ liên kết.",
         contact: "Chọn một người trong danh bạ.",
         audio: "Chọn tệp âm thanh để nghe thử.",
@@ -1118,6 +1121,52 @@
     }
   }
 
+  async function importGifFromGiphy(event) {
+    event?.preventDefault();
+    const sourceUrl = gifGiphyUrl?.value.trim() || "";
+    if (!sourceUrl) {
+      setRichStatus("Hãy dán link GIF từ giphy.com.", "error");
+      gifGiphyUrl?.focus();
+      return;
+    }
+    if (gifGiphyButton?.disabled) return;
+    const previousLabel = gifGiphyButton?.textContent || "Lấy GIF";
+    if (gifGiphyButton) {
+      gifGiphyButton.disabled = true;
+      gifGiphyButton.textContent = "Đang lấy…";
+    }
+    setRichStatus("Đang lấy GIF an toàn từ Giphy…");
+    try {
+      const result = await api("/api/v1/chat/gifs/import", {
+        method: "POST",
+        body: JSON.stringify({ url: sourceUrl }),
+      });
+      const imported = normalizedGif(result?.item);
+      if (!imported) throw new Error("Giphy không trả về GIF hợp lệ.");
+      state.gifLibrary = [
+        imported,
+        ...state.gifLibrary.filter((item) => item.id !== imported.id),
+      ];
+      state.gifQuota = result?.quota || state.gifQuota;
+      if (gifGiphyUrl) gifGiphyUrl.value = "";
+      selectGifLibraryItem(imported);
+      setRichStatus(
+        result.created
+          ? "Đã lưu GIF từ Giphy vào thư viện. Kiểm tra xem trước rồi bấm Gửi."
+          : "GIF này đã có trong thư viện. Kiểm tra xem trước rồi bấm Gửi.",
+      );
+      toast(result.created ? "Đã lấy và lưu GIF từ Giphy." : "GIF đã có sẵn trong thư viện.");
+    } catch (error) {
+      setRichStatus(error.message, "error");
+      toast(`Không thể lấy GIF: ${error.message}`, "error");
+    } finally {
+      if (gifGiphyButton) {
+        gifGiphyButton.disabled = false;
+        gifGiphyButton.textContent = previousLabel;
+      }
+    }
+  }
+
   async function toggleGifFavorite(item) {
     const previous = item.favorite;
     item.favorite = !previous;
@@ -1484,6 +1533,7 @@
     state.richContactSearch = "";
     if (stickerSearch) stickerSearch.value = "";
     if (gifSearch) gifSearch.value = "";
+    if (gifGiphyUrl) gifGiphyUrl.value = "";
     if (gifSaveLibrary) {
       gifSaveLibrary.checked = true;
       gifSaveLibrary.disabled = false;
@@ -5193,6 +5243,12 @@
     if (state.richDraft?.kind === "gif" && !state.richDraft.libraryId) {
       renderRichPreview();
     }
+  });
+  gifGiphyButton?.addEventListener("click", importGifFromGiphy);
+  gifGiphyUrl?.addEventListener("keydown", (event) => {
+    if (event.key !== "Enter") return;
+    event.preventDefault();
+    void importGifFromGiphy();
   });
   $("#chat-sticker-use-manual")?.addEventListener("click", useManualSticker);
   $("#chat-gif-select button")?.addEventListener("click", () => gifInput?.click());

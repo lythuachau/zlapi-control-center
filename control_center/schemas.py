@@ -156,6 +156,15 @@ class ChatGifLibraryDelete(BaseModel):
     confirmation: str = Field(min_length=1, max_length=255)
 
 
+class ChatGifImportCreate(BaseModel):
+    url: str = Field(min_length=1, max_length=2000)
+
+    @field_validator("url")
+    @classmethod
+    def giphy_url_trimmed(cls, value: str) -> str:
+        return value.strip()
+
+
 class ChatReadStateUpdate(BaseModel):
     account_id: str
     thread_id: str = Field(min_length=1, max_length=100)

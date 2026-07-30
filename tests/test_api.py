@@ -2092,3 +2092,85 @@ def test_chat_rich_media_catalog_favorites_and_queue(client: TestClient):
     assert deleted.json()["deleted"] is True
     assert not library_path.exists()
     assert client.get("/api/v1/chat/gifs").json()["quota"]["used_items"] == 0
+
+
+def test_import_giphy_link_into_shared_gif_library(
+    client: TestClient,
+    monkeypatch,
+):
+    csrf = login(client)
+    gif_bytes = b"GIF89a\x02\x00\x03\x00giphy-test"
+    requested_urls: list[str] = []
+
+    class FakeGiphyResponse:
+        status_code = 200
+        headers = {
+            "content-type": "image/gif",
+            "content-length": str(len(gif_bytes)),
+        }
+
+        def iter_content(self, chunk_size: int):
+            assert chunk_size == 1024 * 1024
+            yield gif_bytes[:8]
+            yield gif_bytes[8:]
+
+        def close(self):
+            return None
+
+    def fake_get(url: str, **kwargs):
+        requested_urls.append(url)
+        assert kwargs["stream"] is True
+        assert kwargs["allow_redirects"] is False
+        return FakeGiphyResponse()
+
+    monkeypatch.setattr("control_center.api.requests.get", fake_get)
+
+    imported = client.post(
+        "/api/v1/chat/gifs/import",
+        headers={"X-CSRF-Token": csrf},
+        json={"url": "https://giphy.com/gifs/confused-flying-YsTs5ltWtEhnq"},
+    )
+    assert imported.status_code == 201
+    payload = imported.json()
+    assert payload["created"] is True
+    assert payload["item"]["name"] == "giphy-YsTs5ltWtEhnq.gif"
+    assert payload["item"]["width"] == 2
+    assert payload["item"]["height"] == 3
+    assert payload["item"]["use_count"] == 0
+    assert payload["quota"]["used_items"] == 1
+    assert client.get(payload["item"]["preview_url"]).content == gif_bytes
+    assert requested_urls == [
+        "https://media.giphy.com/media/YsTs5ltWtEhnq/giphy.gif"
+    ]
+
+    duplicate = client.post(
+        "/api/v1/chat/gifs/import",
+        headers={"X-CSRF-Token": csrf},
+        json={"url": "https://media1.giphy.com/media/YsTs5ltWtEhnq/giphy.gif"},
+    )
+    assert duplicate.status_code == 201
+    assert duplicate.json()["created"] is False
+    assert duplicate.json()["item"]["id"] == payload["item"]["id"]
+    assert duplicate.json()["item"]["use_count"] == 0
+    assert client.get("/api/v1/chat/gifs").json()["quota"]["used_items"] == 1
+
+    for invalid_url in (
+        "http://giphy.com/gifs/confused-flying-YsTs5ltWtEhnq",
+        "https://giphy.com.example.com/gifs/confused-flying-YsTs5ltWtEhnq",
+        "https://giphy.com/search/cats",
+    ):
+        rejected = client.post(
+            "/api/v1/chat/gifs/import",
+            headers={"X-CSRF-Token": csrf},
+            json={"url": invalid_url},
+        )
+        assert rejected.status_code == 422
+
+    with client.app.state.database.session_factory() as session:
+        audit = session.scalar(
+            select(AuditLog).where(
+                AuditLog.action == "chat.gif_library.import_giphy"
+            )
+        )
+        assert audit is not None
+        assert audit.details["giphy_id"] == "YsTs5ltWtEhnq"

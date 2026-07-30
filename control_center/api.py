@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import re
 import secrets
 import shutil
 from datetime import timedelta
@@ -10,6 +11,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
 
+import requests
 import zstandard
 from fastapi import APIRouter, Depends, File, HTTPException, Query, Request, UploadFile, status
 from fastapi.responses import StreamingResponse
@@ -72,6 +74,7 @@ from .schemas import (
     ActionInvoke,
     ApiKeyCreate,
     ChatForwardCreate,
+    ChatGifImportCreate,
     ChatGifLibraryDelete,
     ChatGifLibraryUpdate,
     ChatGroupInviteCreate,
@@ -100,6 +103,9 @@ from .security import (
 )
 
 router = APIRouter(prefix="/api/v1")
+
+_GIPHY_ID_PATTERN = re.compile(r"^[A-Za-z0-9]{6,64}$")
+_GIPHY_MEDIA_HOST_PATTERN = re.compile(r"^media[0-9]*\.giphy\.com$")
 
 
 def _require_chat_account(session: Session, account_id: str) -> ZaloAccount:
@@ -503,6 +509,111 @@ def _gif_sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
+def _giphy_gif_id(value: str) -> str:
+    parsed = urlsplit(value.strip())
+    host = (parsed.hostname or "").rstrip(".").lower()
+    try:
+        port = parsed.port
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail="Link Giphy không hợp lệ") from exc
+    if parsed.scheme.lower() != "https" or port not in {None, 443}:
+        raise HTTPException(
+            status_code=422,
+            detail="Link Giphy phải dùng HTTPS",
+        )
+
+    parts = [part for part in parsed.path.split("/") if part]
+    candidate = ""
+    if host in {"giphy.com", "www.giphy.com"}:
+        if len(parts) >= 2 and parts[0].lower() == "embed":
+            candidate = parts[1]
+        elif len(parts) >= 2 and parts[0].lower() in {"gifs", "stickers"}:
+            candidate = parts[-1].rsplit("-", 1)[-1]
+    elif _GIPHY_MEDIA_HOST_PATTERN.fullmatch(host):
+        if len(parts) >= 2 and parts[0].lower() == "media":
+            candidate = parts[1]
+
+    if not _GIPHY_ID_PATTERN.fullmatch(candidate):
+        raise HTTPException(
+            status_code=422,
+            detail="Không nhận dạng được GIF ID từ link giphy.com",
+        )
+    return candidate
+
+
+def _gif_dimensions(path: Path) -> tuple[int | None, int | None]:
+    with path.open("rb") as stream:
+        header = stream.read(10)
+    if len(header) < 10 or header[:6] not in {b"GIF87a", b"GIF89a"}:
+        return None, None
+    width = int.from_bytes(header[6:8], "little")
+    height = int.from_bytes(header[8:10], "little")
+    return (width or None), (height or None)
+
+
+def _download_giphy_gif(
+    *,
+    gif_id: str,
+    target: Path,
+    max_bytes: int,
+    timeout_seconds: int,
+) -> int:
+    media_url = f"https://media.giphy.com/media/{gif_id}/giphy.gif"
+    try:
+        response = requests.get(
+            media_url,
+            stream=True,
+            allow_redirects=False,
+            timeout=(5, min(timeout_seconds, 30)),
+            headers={"User-Agent": "ZLAPI-Control-Center/1.0"},
+        )
+    except requests.RequestException as exc:
+        raise HTTPException(
+            status_code=502,
+            detail="Không thể kết nối tới Giphy; hãy thử lại sau",
+        ) from exc
+
+    try:
+        if response.status_code != 200:
+            raise HTTPException(
+                status_code=422,
+                detail="Giphy không trả về GIF hợp lệ từ link này",
+            )
+        content_type = response.headers.get("content-type", "").split(";", 1)[0].lower()
+        if content_type != "image/gif":
+            raise HTTPException(
+                status_code=422,
+                detail="Nội dung từ Giphy không phải tệp GIF",
+            )
+        try:
+            content_length = int(response.headers.get("content-length", "0") or 0)
+        except ValueError:
+            content_length = 0
+        if content_length > max_bytes:
+            raise HTTPException(
+                status_code=413,
+                detail=f"GIF vượt giới hạn {max_bytes // (1024 * 1024)} MB",
+            )
+
+        size = 0
+        with target.open("xb") as output:
+            for chunk in response.iter_content(chunk_size=1024 * 1024):
+                if not chunk:
+                    continue
+                size += len(chunk)
+                if size > max_bytes:
+                    raise HTTPException(
+                        status_code=413,
+                        detail=f"GIF vượt giới hạn {max_bytes // (1024 * 1024)} MB",
+                    )
+                output.write(chunk)
+        if size == 0:
+            raise HTTPException(status_code=422, detail="Giphy trả về tệp GIF rỗng")
+        return size
+    finally:
+        response.close()
+
+
 def _persist_gif_upload(
     session: Session,
     *,
@@ -511,6 +622,7 @@ def _persist_gif_upload(
     created_by_id: str | None,
     width: int | None,
     height: int | None,
+    mark_used: bool = True,
 ) -> tuple[GifLibraryItem, bool]:
     source = Path(upload.stored_path)
     if not safe_child_path(settings.upload_dir, source) or not source.is_file():
@@ -528,8 +640,9 @@ def _persist_gif_upload(
             existing.width = width
         if existing.height is None and height:
             existing.height = height
-        existing.last_used_at = utcnow()
-        existing.use_count += 1
+        if mark_used:
+            existing.last_used_at = utcnow()
+            existing.use_count += 1
         return existing, False
 
     used_items, used_bytes = _gif_library_usage(session)
@@ -560,9 +673,9 @@ def _persist_gif_upload(
         width=width,
         height=height,
         favorite=False,
-        use_count=1,
+        use_count=1 if mark_used else 0,
         created_by_id=created_by_id,
-        last_used_at=utcnow(),
+        last_used_at=utcnow() if mark_used else None,
     )
     session.add(item)
     try:
@@ -574,8 +687,9 @@ def _persist_gif_upload(
         )
         if existing is None:
             raise
-        existing.last_used_at = utcnow()
-        existing.use_count += 1
+        if mark_used:
+            existing.last_used_at = utcnow()
+            existing.use_count += 1
         return existing, False
     return item, True
 
@@ -1639,6 +1753,77 @@ def list_chat_gifs(
             "max_bytes": settings.gif_library_max_bytes,
         },
         "shared": True,
+    }
+
+
+@router.post("/chat/gifs/import", status_code=status.HTTP_201_CREATED)
+def import_chat_gif(
+    body: ChatGifImportCreate,
+    request: Request,
+    session: Session = Depends(get_db),
+    principal: Principal = Depends(require_scope("jobs:create")),
+    _: None = Depends(verify_csrf),
+) -> dict:
+    settings = request.app.state.settings
+    gif_id = _giphy_gif_id(body.url)
+    settings.upload_dir.mkdir(parents=True, exist_ok=True)
+    temporary_path = settings.upload_dir / f"giphy-{secrets.token_hex(16)}.gif"
+    max_bytes = settings.max_upload_mb * 1024 * 1024
+    try:
+        size = _download_giphy_gif(
+            gif_id=gif_id,
+            target=temporary_path,
+            max_bytes=max_bytes,
+            timeout_seconds=settings.request_timeout_seconds,
+        )
+        width, height = _gif_dimensions(temporary_path)
+        transient_upload = MediaUpload(
+            original_name=f"giphy-{gif_id}.gif",
+            stored_path=str(temporary_path),
+            size_bytes=size,
+            content_type="image/gif",
+            created_by_id=principal.id if principal.kind == "user" else None,
+            expires_at=utcnow() + timedelta(minutes=5),
+        )
+        item, created = _persist_gif_upload(
+            session,
+            upload=transient_upload,
+            settings=settings,
+            created_by_id=principal.id if principal.kind == "user" else None,
+            width=width,
+            height=height,
+            mark_used=False,
+        )
+        session.commit()
+    finally:
+        temporary_path.unlink(missing_ok=True)
+
+    write_audit(
+        session,
+        principal=principal,
+        action="chat.gif_library.import_giphy",
+        resource_type="gif_library_item",
+        resource_id=item.id,
+        details={
+            "source": "giphy",
+            "giphy_id": gif_id,
+            "source_url": body.url,
+            "name": item.original_name,
+            "size_bytes": item.size_bytes,
+            "created": created,
+        },
+        request=request,
+    )
+    used_items, used_bytes = _gif_library_usage(session)
+    return {
+        "item": _gif_library_item_payload(item, settings),
+        "created": created,
+        "quota": {
+            "used_items": used_items,
+            "max_items": settings.gif_library_max_items,
+            "used_bytes": used_bytes,
+            "max_bytes": settings.gif_library_max_bytes,
+        },
     }
 
 
