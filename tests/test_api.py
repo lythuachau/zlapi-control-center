@@ -514,6 +514,8 @@ def test_chat_projects_listener_events_and_queues_safe_send(client: TestClient):
     assert 'data-chat-nav="tasks"' not in page.text
     assert 'id="chat-tasks-panel"' not in page.text
     assert 'data-chat-nav="theme"' in page.text
+    assert 'class="zchat-rail-theme"' in page.text
+    assert 'data-tooltip="Giao diện"' in page.text
     assert 'id="chat-theme-panel"' in page.text
     assert "Midnight" in page.text
     assert "Daylight" in page.text

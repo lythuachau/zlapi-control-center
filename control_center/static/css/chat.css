@@ -356,6 +356,63 @@ body[data-page="chat"] .page > .content {
   flex: 1;
 }
 
+.zchat-rail-theme {
+  position: relative;
+  display: grid;
+  width: 34px;
+  height: 34px;
+  flex: 0 0 auto;
+  place-items: center;
+  border: 1px solid var(--line-strong);
+  border-radius: 11px;
+  background: var(--raised);
+  color: var(--muted);
+  font-size: 16px;
+  line-height: 1;
+  transition: color 180ms ease, border-color 180ms ease, background 180ms ease, transform 120ms ease;
+}
+
+.zchat-rail-theme:hover,
+.zchat-rail-theme.active {
+  border-color: color-mix(in srgb, var(--accent) 65%, var(--line));
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+
+.zchat-rail-theme.active {
+  animation: zchat-icon-spring 380ms cubic-bezier(0.18, 0.89, 0.32, 1.28);
+}
+
+.zchat-rail-theme:active {
+  transform: scale(0.9);
+}
+
+.zchat-rail-theme::after {
+  position: absolute;
+  left: calc(100% + 9px);
+  z-index: 60;
+  width: max-content;
+  max-width: 120px;
+  border: 1px solid var(--line-strong);
+  border-radius: 8px;
+  padding: 6px 8px;
+  background: var(--raised);
+  box-shadow: var(--shadow);
+  color: var(--ink);
+  content: attr(data-tooltip);
+  font-size: 9px;
+  opacity: 0;
+  pointer-events: none;
+  transform: translateX(-4px);
+  transition: opacity 150ms ease, transform 150ms ease;
+}
+
+.zchat-rail-theme:hover::after,
+.zchat-rail-theme:focus-visible::after {
+  opacity: 1;
+  transform: translateX(0);
+}
+
 .zchat-live {
   display: grid;
   place-items: center;
@@ -432,6 +489,7 @@ body[data-page="chat"] .page > .content {
 
 .zchat.theme-signal .zchat-avatar,
 .zchat.theme-signal .zchat-user-avatar,
+.zchat.theme-signal .zchat-rail-theme,
 .zchat.theme-signal .zchat-rail nav button,
 .zchat.theme-signal .zchat-rail nav a,
 .zchat.theme-signal .zchat-rail nav button::before,

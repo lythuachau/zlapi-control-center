@@ -1,7 +1,7 @@
 {% extends "base.html" %}
 
 {% block head %}
-  <link rel="stylesheet" href="{{ url_for('static', path='/css/chat.css') }}?v=20260730-themes-1">
+  <link rel="stylesheet" href="{{ url_for('static', path='/css/chat.css') }}?v=20260730-themes-2">
 {% endblock %}
 
 {% block content %}
@@ -63,14 +63,19 @@
         <button type="button" data-chat-nav="contacts" aria-pressed="false">
           <span>◎</span><small>Danh bạ</small>
         </button>
-        <button type="button" data-chat-nav="theme" aria-pressed="false">
-          <span>◐</span><small>Giao diện</small>
-        </button>
         <button type="button" data-chat-nav="automation" aria-pressed="false">
           <span>⌁</span><small>Tự động hóa</small>
         </button>
       </nav>
       <span class="zchat-rail-spacer"></span>
+      <button
+        class="zchat-rail-theme"
+        type="button"
+        data-chat-nav="theme"
+        aria-label="Giao diện"
+        aria-pressed="false"
+        data-tooltip="Giao diện"
+      >◐</button>
       <span class="zchat-live"><i></i>LIVE</span>
       <a class="zchat-user-avatar" href="/profile" title="Tài khoản cá nhân" aria-label="Mở tài khoản cá nhân">{{ user.display_name[:2]|upper }}</a>
     </aside>
@@ -907,5 +912,5 @@
 {% endblock %}
 
 {% block scripts %}
-  <script defer src="{{ url_for('static', path='/js/chat.js') }}?v=20260730-themes-1"></script>
+  <script defer src="{{ url_for('static', path='/js/chat.js') }}?v=20260730-themes-2"></script>
 {% endblock %}
