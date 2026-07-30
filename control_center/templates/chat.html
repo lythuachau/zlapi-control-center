@@ -1,7 +1,7 @@
 {% extends "base.html" %}
 
 {% block head %}
-  <link rel="stylesheet" href="{{ url_for('static', path='/css/chat.css') }}?v=20260730-profile-identity-1">
+  <link rel="stylesheet" href="{{ url_for('static', path='/css/chat.css') }}?v=20260730-friends-1">
 {% endblock %}
 
 {% block content %}
@@ -13,6 +13,7 @@
   data-can-manage-reactions="{{ 'true' if can_manage_reactions else 'false' }}"
   data-can-manage-gif-library="{{ 'true' if can_manage_gif_library else 'false' }}"
   data-can-manage-groups="{{ 'true' if can_manage_groups else 'false' }}"
+  data-can-manage-friends="{{ 'true' if can_manage_friends else 'false' }}"
   data-max-upload-mb="{{ max_upload_mb }}"
 >
   <header class="zchat-topbar">
@@ -305,6 +306,31 @@
         </dl>
       </div>
 
+      <section class="zchat-detail-section zchat-friendship" id="chat-friendship-panel" hidden>
+        <div class="zchat-group-members-heading">
+          <span>QUAN HỆ ZALO</span>
+          <b class="zchat-friendship-badge" id="chat-friendship-badge">Chưa xác định</b>
+        </div>
+        <p id="chat-friendship-copy">Chọn một hội thoại cá nhân để xem trạng thái quan hệ.</p>
+        {% if can_manage_friends %}
+        <label class="zchat-friend-request-message" id="chat-friend-request-message-row" hidden>
+          <span>Lời chào kết bạn</span>
+          <input
+            id="chat-friend-request-message"
+            maxlength="240"
+            value="Xin chào, mình muốn kết bạn với bạn."
+          >
+        </label>
+        <div class="zchat-friendship-actions" id="chat-friendship-actions">
+          <button type="button" data-friend-action="send_request">Gửi lời mời</button>
+          <button type="button" data-friend-action="accept_request">Chấp nhận lời mời</button>
+          <button class="danger" type="button" data-friend-action="block">Chặn</button>
+          <button type="button" data-friend-action="unblock">Bỏ chặn</button>
+        </div>
+        {% endif %}
+        <small class="zchat-friendship-status" id="chat-friendship-status"></small>
+      </section>
+
       <section class="zchat-detail-section zchat-group-members" id="chat-group-members-panel" hidden>
         <div class="zchat-group-members-heading">
           <span>THÀNH VIÊN NHÓM</span>
@@ -434,6 +460,38 @@
         <button type="button" data-dialog-close>Đóng</button>
         <button class="primary" id="chat-group-invite-submit" type="button" disabled>
           Mời vào nhóm
+        </button>
+      </footer>
+    </div>
+  </dialog>
+  {% endif %}
+
+  {% if can_manage_friends %}
+  <dialog class="zchat-dialog zchat-friend-danger-dialog" id="chat-friend-danger-dialog">
+    <div class="zchat-dialog-shell compact">
+      <header>
+        <span>
+          <small>THAO TÁC NHẠY CẢM</small>
+          <strong id="chat-friend-danger-title">Xác nhận thay đổi quan hệ</strong>
+        </span>
+        <button type="button" data-dialog-close aria-label="Đóng">×</button>
+      </header>
+      <section class="zchat-friend-danger-content">
+        <p id="chat-friend-danger-copy"></p>
+        <label>
+          <span>Nhập chính xác <b id="chat-friend-danger-name"></b></span>
+          <input id="chat-friend-danger-confirmation" maxlength="160" autocomplete="off">
+        </label>
+        <label class="checkbox">
+          <input id="chat-friend-danger-check" type="checkbox">
+          <span>Tôi hiểu thao tác này sẽ thay đổi khả năng liên lạc trên Zalo.</span>
+        </label>
+      </section>
+      <footer>
+        <span id="chat-friend-danger-status">Cần đủ hai bước xác nhận.</span>
+        <button type="button" data-dialog-close>Hủy</button>
+        <button class="primary danger" id="chat-friend-danger-submit" type="button" disabled>
+          Xác nhận
         </button>
       </footer>
     </div>
@@ -855,5 +913,5 @@
 {% endblock %}
 
 {% block scripts %}
-  <script defer src="{{ url_for('static', path='/js/chat.js') }}?v=20260730-profile-identity-1"></script>
+  <script defer src="{{ url_for('static', path='/js/chat.js') }}?v=20260730-friends-1"></script>
 {% endblock %}

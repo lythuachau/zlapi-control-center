@@ -49,9 +49,14 @@
     groupInviteSelection: new Set(),
     groupInviteSearch: "",
     groupManagementJobs: new Map(),
+    friendProfile: null,
+    friendRequestId: 0,
+    friendActionJobs: new Map(),
+    friendDangerAction: "",
     canSend: app.dataset.canSend === "true",
     canManageJobs: app.dataset.canManageJobs === "true",
     canManageGroups: app.dataset.canManageGroups === "true",
+    canManageFriends: app.dataset.canManageFriends === "true",
     reloadTimer: null,
     messageReloadTimer: null,
     messageRequestId: 0,
@@ -152,6 +157,20 @@
   const groupInviteList = $("#chat-group-invite-list");
   const groupManageStatus = $("#chat-group-manage-status");
   const groupInviteSubmit = $("#chat-group-invite-submit");
+  const friendshipPanel = $("#chat-friendship-panel");
+  const friendshipBadge = $("#chat-friendship-badge");
+  const friendshipCopy = $("#chat-friendship-copy");
+  const friendshipStatus = $("#chat-friendship-status");
+  const friendRequestMessageRow = $("#chat-friend-request-message-row");
+  const friendRequestMessage = $("#chat-friend-request-message");
+  const friendDangerDialog = $("#chat-friend-danger-dialog");
+  const friendDangerTitle = $("#chat-friend-danger-title");
+  const friendDangerCopy = $("#chat-friend-danger-copy");
+  const friendDangerName = $("#chat-friend-danger-name");
+  const friendDangerConfirmation = $("#chat-friend-danger-confirmation");
+  const friendDangerCheck = $("#chat-friend-danger-check");
+  const friendDangerStatus = $("#chat-friend-danger-status");
+  const friendDangerSubmit = $("#chat-friend-danger-submit");
   const inboxTitle = $("#chat-inbox-title");
   const conversationRefresh = $("#chat-refresh");
   const messagesNode = $("#chat-messages");
@@ -1664,11 +1683,14 @@
     detail.textContent = item.phone || `ID ${item.user_id}`;
     const stateNode = document.createElement("span");
     stateNode.className = `zchat-contact-presence${item.online ? " online" : ""}`;
-    stateNode.textContent = item.online === true
+    const relationshipLabel = friendshipLabels[
+      item.blocked_by_me ? "blocked" : item.relationship_status
+    ];
+    stateNode.textContent = relationshipLabel || (item.online === true
       ? "Đang hoạt động"
       : item.online === false
         ? "Ngoại tuyến"
-        : "Bạn bè";
+        : "Bạn bè");
     copy.append(name, detail, stateNode);
     const arrow = document.createElement("span");
     arrow.className = "zchat-contact-arrow";
@@ -3943,6 +3965,183 @@
     }
   }
 
+  const friendshipLabels = {
+    friend: "Bạn bè",
+    pending_outgoing: "Đã gửi lời mời",
+    pending_incoming: "Có lời mời đến",
+    blocked: "Đã chặn",
+    unknown: "Chưa xác định",
+  };
+
+  const friendshipDescriptions = {
+    friend: "Hai tài khoản đang là bạn bè trên Zalo.",
+    pending_outgoing: "Lời mời kết bạn đã được gửi và đang chờ người này phản hồi.",
+    pending_incoming: "Tài khoản này đã gửi lời mời kết bạn; bạn có thể chấp nhận.",
+    blocked: "Bạn đã chặn tài khoản này. Việc nhắn tin có thể bị Zalo giới hạn.",
+    unknown: "Zalo chưa cung cấp trạng thái rõ ràng. Bạn có thể gửi hoặc chấp nhận lời mời nếu phù hợp.",
+  };
+
+  function activeFriendProfile() {
+    if (!state.activeThread || state.activeThread.thread_type !== "user") return null;
+    return state.friendProfile || state.activeThread;
+  }
+
+  function activeFriendJob() {
+    const userId = state.activeThread?.thread_id;
+    if (!userId) return null;
+    return [...state.friendActionJobs.entries()].find(
+      ([, value]) => value.userId === userId && value.accountId === state.accountId,
+    ) || null;
+  }
+
+  function renderFriendship() {
+    const profile = activeFriendProfile();
+    if (!friendshipPanel) return;
+    friendshipPanel.hidden = !profile;
+    if (!profile) return;
+    const relationship = profile.blocked_by_me
+      ? "blocked"
+      : profile.relationship_status || "unknown";
+    friendshipBadge.textContent = friendshipLabels[relationship] || friendshipLabels.unknown;
+    friendshipBadge.classList.toggle("blocked", relationship === "blocked");
+    friendshipCopy.textContent = friendshipDescriptions[relationship] || friendshipDescriptions.unknown;
+    const pending = activeFriendJob();
+    if (friendshipStatus) {
+      friendshipStatus.textContent = pending
+        ? "Đang chờ Zalo xác nhận thay đổi…"
+        : profile.synced_at
+          ? `Đồng bộ ${formatTime(profile.synced_at)}`
+          : "Trạng thái sẽ được cập nhật sau khi Zalo phản hồi.";
+    }
+    const visibility = {
+      send_request: relationship === "unknown",
+      accept_request: ["unknown", "pending_incoming"].includes(relationship),
+      block: relationship !== "blocked",
+      unblock: relationship === "blocked",
+    };
+    $$('[data-friend-action]').forEach((button) => {
+      button.hidden = !visibility[button.dataset.friendAction];
+      button.disabled = Boolean(pending);
+    });
+    if (friendRequestMessageRow) {
+      friendRequestMessageRow.hidden = !visibility.send_request;
+    }
+  }
+
+  function mergeFriendProfile(profile) {
+    if (!profile?.user_id) return;
+    const userId = String(profile.user_id);
+    const contact = state.contacts.find((item) => item.user_id === userId);
+    const conversation = state.conversations.find((item) => item.thread_id === userId);
+    for (const item of [contact, conversation, state.activeThread]) {
+      if (!item) continue;
+      const itemId = String(item.user_id || item.thread_id || "");
+      if (itemId !== userId) continue;
+      item.relationship_status = profile.relationship_status || "unknown";
+      item.blocked_by_me = Boolean(profile.blocked_by_me);
+      if (profile.synced_at) {
+        item.name = profile.name || item.name;
+        item.initials = profile.initials || item.initials;
+        item.avatar_url = profile.avatar_url || item.avatar_url;
+      }
+    }
+    state.friendProfile = {
+      ...(state.activeThread || {}),
+      ...profile,
+    };
+    renderFriendship();
+    renderConversations();
+    if (state.nav === "contacts") renderContacts();
+  }
+
+  async function loadFriendship() {
+    const item = state.activeThread;
+    if (!item || item.thread_type !== "user" || !state.accountId) return;
+    const requestId = ++state.friendRequestId;
+    const accountId = state.accountId;
+    const userId = item.thread_id;
+    try {
+      const profile = await api(
+        `/api/v1/chat/friends/${encodeURIComponent(userId)}` +
+        `?account_id=${encodeURIComponent(accountId)}`,
+      );
+      if (
+        requestId !== state.friendRequestId ||
+        state.accountId !== accountId ||
+        state.activeThread?.thread_id !== userId
+      ) return;
+      mergeFriendProfile(profile);
+    } catch (error) {
+      if (friendshipStatus && state.activeThread?.thread_id === userId) {
+        friendshipStatus.textContent = error.message;
+      }
+    }
+  }
+
+  async function submitFriendAction(action, confirmation = null, confirmed = false) {
+    const item = state.activeThread;
+    if (!item || item.thread_type !== "user" || !state.accountId) return;
+    try {
+      const result = await api(
+        `/api/v1/chat/friends/${encodeURIComponent(item.thread_id)}/actions`,
+        {
+          method: "POST",
+          body: JSON.stringify({
+            account_id: state.accountId,
+            action,
+            display_name: item.name,
+            message: action === "send_request" ? friendRequestMessage?.value : null,
+            confirmation,
+            confirmed,
+          }),
+        },
+      );
+      state.friendActionJobs.set(result.job_id, {
+        action,
+        userId: item.thread_id,
+        accountId: state.accountId,
+      });
+      renderFriendship();
+      toast("Đã xếp hàng thao tác quan hệ. Zalo đang xử lý.");
+      return result;
+    } catch (error) {
+      toast(error.message, "error");
+      if (friendshipStatus) friendshipStatus.textContent = error.message;
+      return null;
+    }
+  }
+
+  function updateFriendDangerState() {
+    if (!friendDangerSubmit) return;
+    const expected = state.activeThread?.name || "";
+    const valid = text(friendDangerConfirmation?.value) === expected
+      && Boolean(friendDangerCheck?.checked);
+    friendDangerSubmit.disabled = !valid;
+    if (friendDangerStatus) {
+      friendDangerStatus.textContent = valid
+        ? "Đã đủ hai bước xác nhận."
+        : "Cần nhập đúng tên và đánh dấu xác nhận.";
+    }
+  }
+
+  function openFriendDanger(action) {
+    const item = state.activeThread;
+    if (!item || !["block", "unblock"].includes(action)) return;
+    state.friendDangerAction = action;
+    friendDangerTitle.textContent = action === "block"
+      ? `Chặn ${item.name}`
+      : `Bỏ chặn ${item.name}`;
+    friendDangerCopy.textContent = action === "block"
+      ? "Sau khi chặn, khả năng liên lạc giữa hai tài khoản có thể bị hạn chế theo quy định của Zalo."
+      : "Sau khi bỏ chặn, trạng thái bạn bè không được tự động khôi phục nếu Zalo đã xóa quan hệ trước đó.";
+    friendDangerName.textContent = item.name;
+    friendDangerConfirmation.value = "";
+    friendDangerCheck.checked = false;
+    updateFriendDangerState();
+    dialogOpen(friendDangerDialog);
+    friendDangerConfirmation.focus();
+  }
+
   function updateThreadDetails(item) {
     const kind = item.thread_type === "group" ? "Nhóm Zalo" : "Zalo cá nhân";
     paintAvatar($("#chat-contact-avatar"), item);
@@ -3959,6 +4158,9 @@
     $("#chat-detail-members-row").hidden = item.thread_type !== "group";
     $("#chat-detail-members").textContent = item.member_count || "Chưa đồng bộ";
     if (item.thread_type === "group") {
+      state.friendProfile = null;
+      state.friendRequestId += 1;
+      if (friendshipPanel) friendshipPanel.hidden = true;
       if (state.groupInfoThreadId !== item.thread_id) {
         clearGroupInfo();
         state.groupInfoThreadId = item.thread_id;
@@ -3977,6 +4179,9 @@
       }
     } else {
       clearGroupInfo();
+      state.friendProfile = { ...item, user_id: item.thread_id };
+      renderFriendship();
+      void loadFriendship();
     }
   }
 
@@ -3990,6 +4195,9 @@
     dialogClose(richMediaDialog);
     clearRichDraft();
     state.activeThread = null;
+    state.friendProfile = null;
+    state.friendRequestId += 1;
+    if (friendshipPanel) friendshipPanel.hidden = true;
     state.lastMessageScrollTop = 0;
     state.messagePagination = {
       hasOlder: false,
@@ -4880,6 +5088,27 @@
         window.clearTimeout(state.contactsPollTimer);
         void loadContacts();
       }
+      if (["sendFriendRequest", "acceptFriendRequest", "blockUser", "unblockUser"].includes(action)) {
+        const pending = state.friendActionJobs.get(envelope.payload.job_id);
+        if (pending) {
+          state.friendActionJobs.delete(envelope.payload.job_id);
+          const labels = {
+            sendFriendRequest: "Đã gửi lời mời kết bạn.",
+            acceptFriendRequest: "Đã chấp nhận lời mời kết bạn.",
+            blockUser: "Đã chặn tài khoản.",
+            unblockUser: "Đã bỏ chặn tài khoản.",
+          };
+          toast(labels[action]);
+          if (
+            state.accountId === pending.accountId &&
+            state.activeThread?.thread_id === pending.userId
+          ) {
+            void loadFriendship();
+          }
+          if (state.nav === "contacts") void loadContacts();
+          renderFriendship();
+        }
+      }
       if (action === "__chat_profiles__") {
         const result = envelope.payload?.result || {};
         for (const profile of result.profiles || []) {
@@ -4976,6 +5205,20 @@
       if (action === "fetchAllFriends" && state.nav === "contacts") {
         window.clearTimeout(state.contactsPollTimer);
         void loadContacts();
+      }
+      if (["sendFriendRequest", "acceptFriendRequest", "blockUser", "unblockUser"].includes(action)) {
+        const pending = state.friendActionJobs.get(envelope.payload.job_id);
+        if (pending) {
+          state.friendActionJobs.delete(envelope.payload.job_id);
+          toast("Zalo từ chối thay đổi quan hệ. Mở Tác vụ để xem chi tiết.", "error");
+          if (
+            state.accountId === pending.accountId &&
+            state.activeThread?.thread_id === pending.userId
+          ) {
+            void loadFriendship();
+          }
+          renderFriendship();
+        }
       }
       if (
         action === "__chat_group_info__" &&
@@ -5132,6 +5375,27 @@
   });
   groupInviteSubmit?.addEventListener("click", () => {
     void submitGroupInvite();
+  });
+  $$('[data-friend-action]').forEach((button) => {
+    button.addEventListener("click", () => {
+      const action = button.dataset.friendAction;
+      if (["block", "unblock"].includes(action)) {
+        openFriendDanger(action);
+        return;
+      }
+      void submitFriendAction(action);
+    });
+  });
+  friendDangerConfirmation?.addEventListener("input", updateFriendDangerState);
+  friendDangerCheck?.addEventListener("change", updateFriendDangerState);
+  friendDangerSubmit?.addEventListener("click", async () => {
+    const action = state.friendDangerAction;
+    const confirmation = text(friendDangerConfirmation?.value);
+    if (!action || friendDangerSubmit.disabled) return;
+    friendDangerSubmit.disabled = true;
+    const result = await submitFriendAction(action, confirmation, true);
+    if (result) dialogClose(friendDangerDialog);
+    updateFriendDangerState();
   });
   latestJump?.addEventListener(
     "click",

@@ -2288,6 +2288,102 @@ button.zchat-poll-card {
   display: none;
 }
 
+.zchat-friendship {
+  display: grid;
+  gap: 10px;
+}
+
+.zchat-friendship[hidden] {
+  display: none;
+}
+
+.zchat-friendship-badge {
+  border: 1px solid color-mix(in srgb, var(--accent) 45%, var(--line));
+  border-radius: 999px;
+  padding: 5px 8px;
+  background: var(--accent-soft);
+  color: var(--accent);
+  font-size: 8px;
+  font-weight: 800;
+}
+
+.zchat-friendship-badge.blocked {
+  border-color: color-mix(in srgb, #ff647c 55%, var(--line));
+  background: color-mix(in srgb, #ff647c 13%, var(--panel));
+  color: #ff647c;
+}
+
+.zchat-friendship > p {
+  margin: 0;
+  color: var(--muted);
+  font-size: 9px;
+  line-height: 1.5;
+}
+
+.zchat-friend-request-message {
+  display: grid;
+  gap: 5px;
+}
+
+.zchat-friend-request-message[hidden] {
+  display: none;
+}
+
+.zchat-friend-request-message > span {
+  color: var(--muted);
+  font-size: 8px;
+  font-weight: 700;
+}
+
+.zchat-friend-request-message input {
+  width: 100%;
+  border: 1px solid var(--line);
+  border-radius: 11px;
+  outline: 0;
+  padding: 9px 10px;
+  background: var(--panel);
+  color: var(--ink);
+  font-size: 9px;
+}
+
+.zchat-friend-request-message input:focus {
+  border-color: var(--accent);
+}
+
+.zchat-friendship-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 7px;
+}
+
+.zchat-friendship-actions button {
+  border: 1px solid color-mix(in srgb, var(--accent) 45%, var(--line));
+  border-radius: 10px;
+  padding: 7px 9px;
+  background: color-mix(in srgb, var(--accent) 9%, var(--panel));
+  color: var(--accent);
+  font-size: 8px;
+  font-weight: 800;
+}
+
+.zchat-friendship-actions button.danger {
+  border-color: color-mix(in srgb, #ff647c 45%, var(--line));
+  background: color-mix(in srgb, #ff647c 9%, var(--panel));
+  color: #ff647c;
+}
+
+.zchat-friendship-actions button:disabled {
+  cursor: wait;
+  opacity: 0.5;
+}
+
+.zchat-friendship-status {
+  min-height: 12px;
+  color: var(--muted);
+  font-size: 8px;
+  line-height: 1.4;
+}
+
 .zchat-group-members-heading {
   display: flex;
   align-items: center;
@@ -2736,6 +2832,54 @@ button.zchat-poll-card {
 
 .zchat-group-manage-dialog {
   width: min(640px, calc(100vw - 24px));
+}
+
+.zchat-friend-danger-dialog {
+  width: min(520px, calc(100vw - 24px));
+}
+
+.zchat-friend-danger-content {
+  display: grid;
+  gap: 12px;
+  padding: 16px;
+}
+
+.zchat-friend-danger-content > p {
+  margin: 0;
+  color: var(--muted);
+  font-size: 9px;
+  line-height: 1.55;
+}
+
+.zchat-friend-danger-content > label:not(.checkbox) {
+  display: grid;
+  gap: 6px;
+}
+
+.zchat-friend-danger-content > label > span {
+  color: var(--muted);
+  font-size: 8px;
+  line-height: 1.45;
+}
+
+.zchat-friend-danger-content > label > span b {
+  color: var(--ink);
+}
+
+.zchat-friend-danger-content input[type="text"],
+.zchat-friend-danger-content input:not([type]) {
+  width: 100%;
+  border: 1px solid var(--line);
+  border-radius: 11px;
+  outline: 0;
+  padding: 10px;
+  background: var(--panel);
+  color: var(--ink);
+  font-size: 10px;
+}
+
+.zchat-friend-danger-content input:focus {
+  border-color: #ff647c;
 }
 
 .zchat-group-manage-dialog .zchat-dialog-shell {

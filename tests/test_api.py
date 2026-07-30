@@ -19,6 +19,7 @@ from control_center.models import (
     ZaloContactProfile,
     utcnow,
 )
+from control_center.profiles import apply_relationship_action
 
 from .conftest import login
 
@@ -872,6 +873,8 @@ def test_chat_contacts_reads_friend_cache_and_deduplicates_sync_jobs(client: Tes
     friend_two = payload["contacts"][1]
     assert friend_two["avatar_url"].startswith("https://")
     assert friend_two["online"] is True
+    assert friend_two["relationship_status"] == "friend"
+    assert friend_two["blocked_by_me"] is False
     assert payload["job"]["status"] == "succeeded"
 
     conversations_before_chat = client.get(
@@ -922,6 +925,160 @@ def test_chat_contacts_reads_friend_cache_and_deduplicates_sync_jobs(client: Tes
     assert deduplicated.status_code == 202
     assert deduplicated.json()["deduplicated"] is True
     assert deduplicated.json()["job_id"] == queued.json()["job_id"]
+
+
+def test_chat_friend_actions_require_two_step_confirmation_and_are_audited(
+    client: TestClient,
+):
+    csrf = login(client)
+    account_id = client.post(
+        "/api/v1/accounts",
+        headers={"X-CSRF-Token": csrf},
+        json={
+            "name": "Friend management account",
+            "imei": "imei-friend-actions-12345",
+            "cookies": {"zpw_sek": "friend-actions-secret"},
+            "listener_enabled": True,
+        },
+    ).json()["id"]
+    with client.app.state.database.session_factory() as session:
+        account = session.get(ZaloAccount, account_id)
+        account.status = "online"
+        session.add(
+            ZaloContactProfile(
+                account_id=account_id,
+                user_id="person-77",
+                name="Người Cần Chặn",
+                relationship_status="friend",
+            )
+        )
+        session.commit()
+
+    relationship = client.get(
+        "/api/v1/chat/friends/person-77",
+        params={"account_id": account_id},
+    )
+    assert relationship.status_code == 200
+    assert relationship.json()["relationship_status"] == "friend"
+
+    missing_second_step = client.post(
+        "/api/v1/chat/friends/person-77/actions",
+        headers={"X-CSRF-Token": csrf},
+        json={
+            "account_id": account_id,
+            "action": "block",
+            "confirmation": "Người Cần Chặn",
+            "confirmed": False,
+        },
+    )
+    assert missing_second_step.status_code == 422
+
+    wrong_name = client.post(
+        "/api/v1/chat/friends/person-77/actions",
+        headers={"X-CSRF-Token": csrf},
+        json={
+            "account_id": account_id,
+            "action": "block",
+            "confirmation": "Sai tên",
+            "confirmed": True,
+        },
+    )
+    assert wrong_name.status_code == 422
+
+    queued = client.post(
+        "/api/v1/chat/friends/person-77/actions",
+        headers={"X-CSRF-Token": csrf},
+        json={
+            "account_id": account_id,
+            "action": "block",
+            "confirmation": "Người Cần Chặn",
+            "confirmed": True,
+        },
+    )
+    assert queued.status_code == 202
+    assert queued.json()["action"] == "blockUser"
+
+    with client.app.state.database.session_factory() as session:
+        job = session.get(Job, queued.json()["job_id"])
+        assert job.action == "blockUser"
+        assert job.payload["userId"] == "person-77"
+        assert "confirmation" not in job.payload
+        audit = session.scalar(
+            select(AuditLog).where(
+                AuditLog.action == "chat.friend.block.enqueue",
+                AuditLog.resource_id == f"{account_id}:person-77",
+            )
+        )
+        assert audit is not None
+        apply_relationship_action(
+            session,
+            account_id=account_id,
+            user_id="person-77",
+            action="blockUser",
+        )
+        session.commit()
+
+    blocked = client.get(
+        "/api/v1/chat/friends/person-77",
+        params={"account_id": account_id},
+    )
+    assert blocked.json()["relationship_status"] == "blocked"
+    assert blocked.json()["blocked_by_me"] is True
+
+    unblocked = client.post(
+        "/api/v1/chat/friends/person-77/actions",
+        headers={"X-CSRF-Token": csrf},
+        json={
+            "account_id": account_id,
+            "action": "unblock",
+            "confirmation": "Người Cần Chặn",
+            "confirmed": True,
+        },
+    )
+    assert unblocked.status_code == 202
+    assert unblocked.json()["action"] == "unblockUser"
+
+
+def test_chat_friend_request_queues_only_safe_payload(client: TestClient):
+    csrf = login(client)
+    account_id = client.post(
+        "/api/v1/accounts",
+        headers={"X-CSRF-Token": csrf},
+        json={
+            "name": "Friend request account",
+            "imei": "imei-friend-request-12345",
+            "cookies": {"zpw_sek": "friend-request-secret"},
+            "listener_enabled": True,
+        },
+    ).json()["id"]
+    with client.app.state.database.session_factory() as session:
+        account = session.get(ZaloAccount, account_id)
+        account.status = "online"
+        session.commit()
+
+    queued = client.post(
+        "/api/v1/chat/friends/person-88/actions",
+        headers={"X-CSRF-Token": csrf},
+        json={
+            "account_id": account_id,
+            "action": "send_request",
+            "display_name": "Người Mới",
+            "message": "Xin chào bạn",
+        },
+    )
+    assert queued.status_code == 202
+    with client.app.state.database.session_factory() as session:
+        job = session.get(Job, queued.json()["job_id"])
+        assert job.action == "sendFriendRequest"
+        assert job.payload["userId"] == "person-88"
+        assert job.payload["msg"] == "Xin chào bạn"
+        audit = session.scalar(
+            select(AuditLog).where(
+                AuditLog.action == "chat.friend.send_request.enqueue"
+            )
+        )
+        assert audit is not None
+        assert "Xin chào bạn" not in str(audit.details)
 
 
 def test_chat_profiles_correct_outgoing_identity_and_enrich_messages(client: TestClient):

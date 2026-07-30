@@ -724,6 +724,10 @@ def conversation_payloads(
                 else _text(profile.avatar_url if profile else None)
             ),
             "profile_cached": bool(profile) if kind == "user" else True,
+            "relationship_status": (
+                profile.relationship_status if profile else "unknown"
+            ) if kind == "user" else None,
+            "blocked_by_me": bool(profile.blocked_by_me) if profile else False,
             "member_count": metadata.get("member_count") if kind == "group" else None,
             "preview": message["text"],
             "preview_author_name": message["author_name"],

@@ -191,6 +191,23 @@ class ChatProfileSyncCreate(BaseModel):
         return normalized
 
 
+class ChatFriendActionCreate(BaseModel):
+    account_id: str
+    action: Literal["send_request", "accept_request", "block", "unblock"]
+    display_name: str | None = Field(default=None, max_length=160)
+    message: str | None = Field(default=None, max_length=240)
+    confirmation: str | None = Field(default=None, max_length=160)
+    confirmed: bool = False
+
+    @field_validator("display_name", "message", "confirmation")
+    @classmethod
+    def friend_action_text_trimmed(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        value = value.strip()
+        return value or None
+
+
 class ChatGroupRenameCreate(BaseModel):
     account_id: str
     current_name: str = Field(min_length=1, max_length=120)

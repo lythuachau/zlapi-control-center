@@ -77,6 +77,12 @@ class ZaloContactProfile(Base):
     avatar_url: Mapped[str | None] = mapped_column(Text, nullable=True)
     phone: Mapped[str | None] = mapped_column(String(40), nullable=True)
     online: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    relationship_status: Mapped[str] = mapped_column(
+        String(32),
+        default="unknown",
+        index=True,
+    )
+    blocked_by_me: Mapped[bool] = mapped_column(Boolean, default=False)
     source: Mapped[str] = mapped_column(String(40), default="fetchUserInfo")
     synced_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),

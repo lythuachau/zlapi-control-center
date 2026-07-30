@@ -1,9 +1,11 @@
 from __future__ import annotations
 
-from control_center.connector import ZaloConnector
+import pytest
+
+from control_center.connector import ZaloConnector, ZaloResponseError
 from control_center.db import Database
 from control_center.models import ZaloAccount, ZaloContactProfile
-from control_center.profiles import normalize_profiles
+from control_center.profiles import apply_relationship_action, normalize_profiles
 
 
 class FakeProfileClient:
@@ -29,6 +31,12 @@ class FakeProfileClient:
         }
 
 
+class RejectedRelationshipClient:
+    def blockUser(self, userId):
+        assert userId == "person-rejected"
+        return {"error_code": 403, "error_message": "not allowed"}
+
+
 def test_normalize_profiles_supports_profile_maps_and_protocol_relative_avatars():
     profiles = normalize_profiles(
         {
@@ -48,8 +56,33 @@ def test_normalize_profiles_supports_profile_maps_and_protocol_relative_avatars(
             "avatar_url": "https://s120-ava-talk.zadn.vn/person-1.jpg",
             "online": None,
             "phone": None,
+            "relationship_status": "unknown",
+            "blocked_by_me": False,
         }
     ]
+
+
+def test_normalize_profiles_derives_relationship_state():
+    profiles = normalize_profiles(
+        {
+            "profiles": {
+                "friend-1": {"displayName": "Bạn Một", "isFr": 1},
+                "blocked-2": {
+                    "displayName": "Bạn Hai",
+                    "isBlockedByMe": True,
+                },
+                "pending-3": {
+                    "displayName": "Bạn Ba",
+                    "friendStatus": "request_received",
+                },
+            }
+        }
+    )
+    by_id = {item["user_id"]: item for item in profiles}
+    assert by_id["friend-1"]["relationship_status"] == "friend"
+    assert by_id["blocked-2"]["relationship_status"] == "blocked"
+    assert by_id["blocked-2"]["blocked_by_me"] is True
+    assert by_id["pending-3"]["relationship_status"] == "pending_incoming"
 
 
 def test_connector_fetches_and_caches_private_chat_profiles(settings):
@@ -97,4 +130,63 @@ def test_connector_fetches_and_caches_private_chat_profiles(settings):
     assert rows["visitor-3"].name == "Zalo itor-3"
     assert rows["visitor-3"].avatar_url is None
     assert "self-uid" not in rows
+    database.dispose()
+
+
+def test_apply_relationship_action_updates_cached_profile(settings):
+    settings.ensure_directories()
+    database = Database(settings)
+    database.create_schema()
+    with database.session_factory() as session:
+        account = ZaloAccount(
+            name="Relationship account",
+            cookie_cipher="unused",
+            imei_cipher="unused",
+        )
+        session.add(account)
+        session.commit()
+        account_id = account.id
+
+        profile = apply_relationship_action(
+            session,
+            account_id=account_id,
+            user_id="person-42",
+            action="blockUser",
+        )
+        assert profile.relationship_status == "blocked"
+        assert profile.blocked_by_me is True
+
+        profile = apply_relationship_action(
+            session,
+            account_id=account_id,
+            user_id="person-42",
+            action="unblockUser",
+        )
+        assert profile.relationship_status == "unknown"
+        assert profile.blocked_by_me is False
+    database.dispose()
+
+
+def test_relationship_connector_rejects_zalo_error_payload(settings):
+    settings.ensure_directories()
+    database = Database(settings)
+    database.create_schema()
+    connector = ZaloConnector(settings, object())
+    connector.client_for = lambda _account: RejectedRelationshipClient()
+    with database.session_factory() as session:
+        account = ZaloAccount(
+            name="Rejected relationship account",
+            cookie_cipher="unused",
+            imei_cipher="unused",
+            enabled=True,
+        )
+        session.add(account)
+        session.commit()
+        with pytest.raises(ZaloResponseError, match=r"Zalo #403"):
+            connector.execute(
+                session,
+                account,
+                "blockUser",
+                {"userId": "person-rejected"},
+            )
     database.dispose()

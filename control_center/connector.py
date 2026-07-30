@@ -635,6 +635,13 @@ class ZaloConnector:
             client = self.client_for(account)
             result = getattr(client, spec.callable_method)(**arguments)
             serialized = jsonable(result)
+            if action in {
+                "sendFriendRequest",
+                "acceptFriendRequest",
+                "blockUser",
+                "unblockUser",
+            }:
+                serialized = ensure_zalo_success(serialized, action)
             if action == "fetchAllFriends":
                 cache_profiles(
                     session,
@@ -843,7 +850,7 @@ class ZaloConnector:
         try:
             client = self.client_for(account)
             response = ensure_zalo_success(
-                client.fetchUserInfo(user_ids),
+                client.fetchUserInfo(list(user_ids)),
                 "fetchUserInfo",
             )
             profiles = cache_profiles(

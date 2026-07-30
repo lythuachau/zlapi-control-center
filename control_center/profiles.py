@@ -35,6 +35,58 @@ AVATAR_KEYS = (
 )
 
 
+def profile_bool(value: Any) -> bool | None:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)) and value in {0, 1}:
+        return bool(value)
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {"1", "true", "yes"}:
+            return True
+        if normalized in {"0", "false", "no"}:
+            return False
+    return None
+
+
+def relationship_state(item: dict) -> tuple[str, bool]:
+    blocked = next(
+        (
+            value
+            for key in ("isBlockedByMe", "blockedByMe", "isBlocked")
+            if (value := profile_bool(item.get(key))) is not None
+        ),
+        False,
+    )
+    if blocked:
+        return "blocked", True
+    is_friend = next(
+        (
+            value
+            for key in ("isFr", "isFriend", "friend", "is_friend")
+            if (value := profile_bool(item.get(key))) is not None
+        ),
+        False,
+    )
+    if is_friend:
+        return "friend", False
+    raw_status = profile_text(
+        item.get("relationship_status")
+        or item.get("friendStatus")
+        or item.get("relation")
+    )
+    normalized = (raw_status or "").replace("-", "_").replace(" ", "_").lower()
+    if normalized in {"friend", "friends", "accepted"}:
+        return "friend", False
+    if normalized in {"pending_outgoing", "sent", "request_sent", "outgoing"}:
+        return "pending_outgoing", False
+    if normalized in {"pending_incoming", "received", "request_received", "incoming"}:
+        return "pending_incoming", False
+    if normalized in {"blocked", "block"}:
+        return "blocked", True
+    return "unknown", False
+
+
 def profile_text(value: Any) -> str | None:
     if isinstance(value, str):
         value = value.strip()
@@ -137,6 +189,7 @@ def normalize_profiles(result: Any) -> list[dict]:
         if online is None:
             account_status = item.get("accountStatus")
             online = bool(account_status) if account_status is not None else None
+        relationship_status, blocked_by_me = relationship_state(item)
         profiles.append(
             {
                 "user_id": user_id,
@@ -145,6 +198,8 @@ def normalize_profiles(result: Any) -> list[dict]:
                 "avatar_url": avatar_url,
                 "online": bool(online) if online is not None else None,
                 "phone": profile_text(item.get("phoneNumber") or item.get("phone")),
+                "relationship_status": relationship_status,
+                "blocked_by_me": blocked_by_me,
             }
         )
         seen.add(user_id)
@@ -176,6 +231,8 @@ def cache_profiles(
             "avatar_url": None,
             "online": None,
             "phone": None,
+            "relationship_status": "unknown",
+            "blocked_by_me": False,
         }
 
     existing = {
@@ -206,6 +263,17 @@ def cache_profiles(
             row.phone = item["phone"]
         if item["online"] is not None:
             row.online = item["online"]
+        relationship_status = item["relationship_status"]
+        if source == "fetchAllFriends" and relationship_status == "unknown":
+            relationship_status = "friend"
+        if row.blocked_by_me and source == "fetchAllFriends":
+            relationship_status = "blocked"
+        if relationship_status != "unknown" or not row.relationship_status:
+            row.relationship_status = relationship_status
+        if item["blocked_by_me"] or relationship_status == "blocked":
+            row.blocked_by_me = True
+        elif relationship_status == "friend":
+            row.blocked_by_me = False
         row.source = source
         row.synced_at = synced_at
     session.flush()
@@ -231,3 +299,38 @@ def cached_profiles(
         item.user_id: item
         for item in session.scalars(statement).all()
     }
+
+
+def apply_relationship_action(
+    session: Session,
+    *,
+    account_id: str,
+    user_id: str,
+    action: str,
+) -> ZaloContactProfile:
+    row = session.get(ZaloContactProfile, (account_id, user_id))
+    if row is None:
+        row = ZaloContactProfile(
+            account_id=account_id,
+            user_id=user_id,
+            name=f"Zalo {user_id[-6:]}",
+        )
+        session.add(row)
+    if action == "sendFriendRequest":
+        row.relationship_status = "pending_outgoing"
+        row.blocked_by_me = False
+    elif action == "acceptFriendRequest":
+        row.relationship_status = "friend"
+        row.blocked_by_me = False
+    elif action == "blockUser":
+        row.relationship_status = "blocked"
+        row.blocked_by_me = True
+    elif action == "unblockUser":
+        row.relationship_status = "unknown"
+        row.blocked_by_me = False
+    else:
+        raise ValueError(f"Unsupported relationship action: {action}")
+    row.source = action
+    row.synced_at = utcnow()
+    session.flush()
+    return row

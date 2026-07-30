@@ -62,7 +62,12 @@ from .models import (
     ZaloContactProfile,
     utcnow,
 )
-from .profiles import normalize_profiles, profile_records
+from .profiles import (
+    cached_profiles,
+    normalize_profiles,
+    profile_initials,
+    profile_records,
+)
 from .queue import cancel_job, enqueue_job, retry_job
 from .reactions import (
     reaction_by_id,
@@ -76,6 +81,7 @@ from .schemas import (
     ActionInvoke,
     ApiKeyCreate,
     ChatForwardCreate,
+    ChatFriendActionCreate,
     ChatGifImportCreate,
     ChatGifLibraryDelete,
     ChatGifLibraryUpdate,
@@ -212,6 +218,23 @@ def _contact_records(value: Any) -> list[tuple[str | None, dict]]:
 
 def _normalize_contacts(result: Any) -> list[dict]:
     return normalize_profiles(result)
+
+
+def _contact_profile_payload(profile: ZaloContactProfile | None, user_id: str) -> dict:
+    name = profile.name if profile else f"Zalo {user_id[-6:]}"
+    return {
+        "user_id": user_id,
+        "name": name,
+        "initials": profile_initials(name),
+        "avatar_url": profile.avatar_url if profile else None,
+        "phone": profile.phone if profile else None,
+        "online": profile.online if profile else None,
+        "relationship_status": (
+            profile.relationship_status if profile else "unknown"
+        ),
+        "blocked_by_me": bool(profile.blocked_by_me) if profile else False,
+        "synced_at": profile.synced_at if profile else None,
+    }
 
 
 def _contacts_job_payload(job: Job | None) -> dict | None:
@@ -1556,10 +1579,169 @@ def list_chat_contacts(
         .order_by(desc(Job.finished_at), desc(Job.created_at))
         .limit(1)
     )
+    contacts = _normalize_contacts(latest_success.result if latest_success else None)
+    profile_cache = cached_profiles(
+        session,
+        account_id=account_id,
+        user_ids={item["user_id"] for item in contacts},
+    )
+    for contact in contacts:
+        profile = profile_cache.get(contact["user_id"])
+        if profile:
+            contact.update(_contact_profile_payload(profile, contact["user_id"]))
+        elif contact.get("relationship_status") == "unknown":
+            contact["relationship_status"] = "friend"
+            contact["blocked_by_me"] = False
     return {
-        "contacts": _normalize_contacts(latest_success.result if latest_success else None),
+        "contacts": contacts,
         "last_sync_at": latest_success.finished_at if latest_success else None,
         "job": _contacts_job_payload(latest_job),
+    }
+
+
+@router.get("/chat/friends/{user_id}")
+def get_chat_friend_relationship(
+    user_id: str,
+    account_id: str,
+    session: Session = Depends(get_db),
+    _: Principal = Depends(require_scope("read")),
+) -> dict:
+    account = session.get(ZaloAccount, account_id)
+    if account is None:
+        raise HTTPException(status_code=404, detail="Account not found")
+    user_id = user_id.strip()
+    if not user_id or len(user_id) > 100:
+        raise HTTPException(status_code=422, detail="User ID is invalid")
+    profile = session.get(ZaloContactProfile, (account_id, user_id))
+    return _contact_profile_payload(profile, user_id)
+
+
+@router.post(
+    "/chat/friends/{user_id}/actions",
+    status_code=status.HTTP_202_ACCEPTED,
+)
+def manage_chat_friend_relationship(
+    user_id: str,
+    body: ChatFriendActionCreate,
+    request: Request,
+    session: Session = Depends(get_db),
+    principal: Principal = Depends(require_scope("accounts:write")),
+    _: None = Depends(verify_csrf),
+) -> dict:
+    account = _require_chat_account(session, body.account_id)
+    user_id = user_id.strip()
+    if not user_id or len(user_id) > 100:
+        raise HTTPException(status_code=422, detail="User ID is invalid")
+    if user_id == account.zalo_uid:
+        raise HTTPException(status_code=409, detail="Không thể quản lý quan hệ với chính tài khoản này")
+
+    profile = session.get(ZaloContactProfile, (account.id, user_id))
+    display_name = (
+        profile.name
+        if profile
+        else body.display_name or f"Zalo {user_id[-6:]}"
+    )
+    action_map = {
+        "send_request": "sendFriendRequest",
+        "accept_request": "acceptFriendRequest",
+        "block": "blockUser",
+        "unblock": "unblockUser",
+    }
+    connector_action = action_map[body.action]
+    relationship_status = profile.relationship_status if profile else "unknown"
+    if body.action == "send_request" and relationship_status in {
+        "friend",
+        "pending_outgoing",
+        "blocked",
+    }:
+        raise HTTPException(status_code=409, detail="Quan hệ này không thể gửi thêm lời mời kết bạn")
+    if body.action == "accept_request" and relationship_status in {"friend", "blocked"}:
+        raise HTTPException(
+            status_code=409,
+            detail="Quan hệ này không thể chấp nhận lời mời kết bạn",
+        )
+    if body.action == "block" and (relationship_status == "blocked" or (profile and profile.blocked_by_me)):
+        raise HTTPException(status_code=409, detail="Tài khoản này đã bị chặn")
+    if body.action == "unblock" and relationship_status != "blocked" and not (profile and profile.blocked_by_me):
+        raise HTTPException(status_code=409, detail="Tài khoản này chưa bị chặn")
+    if body.action in {"block", "unblock"} and (
+        not body.confirmed
+        or not secrets.compare_digest(
+            (body.confirmation or "").encode("utf-8"),
+            display_name.encode("utf-8"),
+        )
+    ):
+        raise HTTPException(
+            status_code=422,
+            detail=f"Nhập chính xác tên '{display_name}' và xác nhận cảnh báo để tiếp tục",
+        )
+
+    payload: dict[str, Any] = {
+        "userId": user_id,
+        "_chat_context": {
+            "friend_action": body.action,
+            "display_name": display_name,
+        },
+    }
+    if body.action == "send_request":
+        payload["msg"] = body.message or "Xin chào, mình muốn kết bạn với bạn."
+    active_jobs = session.scalars(
+        select(Job)
+        .where(
+            Job.account_id == account.id,
+            Job.action == connector_action,
+            Job.status.in_(("queued", "running")),
+        )
+        .order_by(desc(Job.created_at))
+        .limit(50)
+    ).all()
+    active_job = next(
+        (
+            job
+            for job in active_jobs
+            if str((job.payload or {}).get("userId") or "") == user_id
+        ),
+        None,
+    )
+    if active_job:
+        return {
+            "job_id": active_job.id,
+            "status": active_job.status,
+            "action": connector_action,
+            "deduplicated": True,
+            "profile": _contact_profile_payload(profile, user_id),
+        }
+
+    job = enqueue_job(
+        session,
+        account_id=account.id,
+        action=connector_action,
+        payload=payload,
+        created_by_id=principal.id if principal.kind == "user" else None,
+        priority=35,
+        max_attempts=1,
+    )
+    write_audit(
+        session,
+        principal=principal,
+        action=f"chat.friend.{body.action}.enqueue",
+        resource_type="zalo_contact_profile",
+        resource_id=f"{account.id}:{user_id}",
+        details={
+            "account_id": account.id,
+            "user_id": user_id,
+            "display_name": display_name,
+            "job_id": job.id,
+            "connector_action": connector_action,
+        },
+        request=request,
+    )
+    return {
+        "job_id": job.id,
+        "status": job.status,
+        "action": connector_action,
+        "deduplicated": False,
+        "profile": _contact_profile_payload(profile, user_id),
     }
 
 

@@ -11,6 +11,7 @@ from .config import get_settings
 from .connector import UnsupportedActionError, ZaloConnector
 from .db import Database
 from .models import AuditLog, Event, Job, ZaloAccount
+from .profiles import apply_relationship_action
 from .queue import claim_job, complete_job, fail_job, recover_stale_jobs
 from .security import SecretBox
 
@@ -143,6 +144,20 @@ class Worker:
                     )
                 else:
                     result = self.connector.execute(session, account, action, job.payload)
+                if action in {
+                    "sendFriendRequest",
+                    "acceptFriendRequest",
+                    "blockUser",
+                    "unblockUser",
+                }:
+                    user_id = str((job.payload or {}).get("userId") or "").strip()
+                    if user_id:
+                        apply_relationship_action(
+                            session,
+                            account_id=account.id,
+                            user_id=user_id,
+                            action=action,
+                        )
                 complete_job(session, job_id, result)
                 refreshed = session.get(Job, job_id)
                 self._emit(session, "job.succeeded", refreshed, {"result": result})
