@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from copy import deepcopy
 
+import pytest
+
 from control_center.db import Database
 from control_center.models import AppSetting
 from control_center.reactions import (
@@ -39,6 +41,25 @@ def test_complete_native_reaction_catalog_is_available(settings):
         "/-loveu",
         133,
     )
+    database.dispose()
+
+
+def test_quick_reaction_limit_accepts_40_and_rejects_41(settings):
+    database = Database(settings)
+    database.create_schema()
+
+    with database.session_factory() as session:
+        catalog = reaction_catalog(session, include_disabled=True)
+        for index, item in enumerate(catalog):
+            item["quick"] = index < 40
+        saved = save_reaction_catalog(session, catalog, updated_by_id=None)
+        assert sum(item["quick"] and item["enabled"] for item in saved) == 40
+
+        for index, item in enumerate(saved):
+            item["quick"] = index < 41
+        with pytest.raises(ValueError, match="tối đa 40 reaction nhanh"):
+            save_reaction_catalog(session, saved, updated_by_id=None)
+
     database.dispose()
 
 

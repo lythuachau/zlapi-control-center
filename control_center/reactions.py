@@ -11,6 +11,7 @@ from .models import AppSetting
 
 REACTION_CATALOG_KEY = "chat.reaction_catalog"
 REACTION_ID_PATTERN = re.compile(r"^[a-z0-9][a-z0-9_-]{0,39}$")
+MAX_QUICK_REACTIONS = 40
 
 
 def _native_reaction(
@@ -195,8 +196,10 @@ def save_reaction_catalog(
     if len(normalized) > 80:
         raise ValueError("Thư viện chỉ chứa tối đa 80 reaction")
     quick_count = sum(item["quick"] and item["enabled"] for item in normalized)
-    if quick_count > 8:
-        raise ValueError("Chỉ được chọn tối đa 8 reaction nhanh")
+    if quick_count > MAX_QUICK_REACTIONS:
+        raise ValueError(
+            f"Chỉ được chọn tối đa {MAX_QUICK_REACTIONS} reaction nhanh"
+        )
     setting = session.get(AppSetting, REACTION_CATALOG_KEY)
     if setting is None:
         setting = AppSetting(

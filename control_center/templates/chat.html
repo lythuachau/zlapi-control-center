@@ -1,7 +1,7 @@
 {% extends "base.html" %}
 
 {% block head %}
-  <link rel="stylesheet" href="{{ url_for('static', path='/css/chat.css') }}?v=20260730-reactions-1">
+  <link rel="stylesheet" href="{{ url_for('static', path='/css/chat.css') }}?v=20260730-quick-reactions-1">
 {% endblock %}
 
 {% block content %}
@@ -959,7 +959,7 @@
         <section>
           <div class="zchat-manager-heading">
             <strong>Reaction đang dùng</strong>
-            <small>Tối đa 8 icon trong thanh chọn nhanh</small>
+            <small>Tối đa 40 icon trong thanh chọn nhanh</small>
           </div>
           <div class="zchat-catalog-list" id="chat-reaction-catalog-list"></div>
         </section>
@@ -1026,5 +1026,5 @@
 {% endblock %}
 
 {% block scripts %}
-  <script defer src="{{ url_for('static', path='/js/chat.js') }}?v=20260730-reactions-1"></script>
+  <script defer src="{{ url_for('static', path='/js/chat.js') }}?v=20260730-quick-reactions-1"></script>
 {% endblock %}

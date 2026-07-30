@@ -8,6 +8,7 @@
   const { api, toast } = control;
   const $ = (selector, root = document) => root.querySelector(selector);
   const $$ = (selector, root = document) => [...root.querySelectorAll(selector)];
+  const MAX_QUICK_REACTIONS = 40;
   const state = {
     accountId: "",
     activeThread: null,
@@ -4846,7 +4847,9 @@
     reactionQuick.replaceChildren();
     reactionAll.replaceChildren();
     const enabled = state.reactionCatalog.filter((item) => item.enabled);
-    const quick = enabled.filter((item) => item.quick).slice(0, 8);
+    const quick = enabled
+      .filter((item) => item.quick)
+      .slice(0, MAX_QUICK_REACTIONS);
     const quickIds = new Set(quick.map((item) => item.id));
     for (const item of quick) {
       reactionQuick.append(reactionButton(item, message, { compact: true }));
@@ -5190,6 +5193,14 @@
       check.checked = Boolean(item.quick);
       check.disabled = !item.enabled;
       check.addEventListener("change", () => {
+        const selectedCount = items.filter(
+          (candidate) => candidate !== item && candidate.enabled && candidate.quick,
+        ).length;
+        if (check.checked && selectedCount >= MAX_QUICK_REACTIONS) {
+          check.checked = false;
+          toast(`Chỉ được chọn tối đa ${MAX_QUICK_REACTIONS} reaction nhanh.`, "error");
+          return;
+        }
         item.quick = check.checked;
       });
       quick.append(check, document.createTextNode("Nhanh"));
