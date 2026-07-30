@@ -7,6 +7,7 @@ import signal
 import socket
 import threading
 
+from .automations import mark_automation_run
 from .config import get_settings
 from .connector import UnsupportedActionError, ZaloConnector
 from .db import Database
@@ -106,6 +107,12 @@ class Worker:
                         account,
                         job.payload,
                     )
+                elif action == "__chat_automation_sticker__":
+                    result = self.connector.send_chat_automation_sticker(
+                        session,
+                        account,
+                        job.payload,
+                    )
                 elif action == "__chat_group_info__":
                     result = self.connector.fetch_chat_group_info(
                         session,
@@ -159,12 +166,19 @@ class Worker:
                             action=action,
                         )
                 complete_job(session, job_id, result)
+                mark_automation_run(session, job_id, "succeeded")
                 refreshed = session.get(Job, job_id)
                 self._emit(session, "job.succeeded", refreshed, {"result": result})
                 logger.info("Job %s (%s) succeeded", job_id, action)
             except Exception as exc:
                 retryable = not isinstance(exc, (UnsupportedActionError, TypeError, ValueError))
                 state = fail_job(session, job_id, str(exc), retryable=retryable)
+                mark_automation_run(
+                    session,
+                    job_id,
+                    "queued" if state == "queued" else "failed",
+                    error=str(exc),
+                )
                 refreshed = session.get(Job, job_id)
                 self._emit(
                     session,

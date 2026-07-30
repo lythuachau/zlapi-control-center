@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 RoleName = Literal["super_admin", "admin", "operator", "viewer"]
 
@@ -146,6 +146,38 @@ class ChatStickerPreference(BaseModel):
 class ChatStickerPreferencesUpdate(BaseModel):
     account_id: str
     favorites: list[ChatStickerPreference] = Field(default_factory=list, max_length=48)
+
+
+class ChatAutomationMentionStickerUpdate(BaseModel):
+    account_id: str
+    enabled: bool = False
+    group_ids: list[str] = Field(min_length=1, max_length=100)
+    trigger_direct_mention: bool = True
+    trigger_mention_all: bool = True
+    sticker: ChatStickerPreference
+    cooldown_seconds: int = Field(default=30, ge=10, le=3600)
+
+    @field_validator("group_ids")
+    @classmethod
+    def unique_group_ids(cls, value: list[str]) -> list[str]:
+        normalized: list[str] = []
+        seen: set[str] = set()
+        for item in value:
+            group_id = str(item).strip()
+            if not group_id or len(group_id) > 100:
+                raise ValueError("Group ID is invalid")
+            if group_id not in seen:
+                normalized.append(group_id)
+                seen.add(group_id)
+        if not normalized:
+            raise ValueError("At least one group is required")
+        return normalized
+
+    @model_validator(mode="after")
+    def at_least_one_trigger(self):
+        if not self.trigger_direct_mention and not self.trigger_mention_all:
+            raise ValueError("At least one mention trigger is required")
+        return self
 
 
 class ChatGifLibraryUpdate(BaseModel):

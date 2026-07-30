@@ -27,6 +27,11 @@ from .auth import (
     verify_csrf,
     write_audit,
 )
+from .automations import (
+    MENTION_STICKER_KIND,
+    automation_rule_payload,
+    mark_automation_run,
+)
 from .catalog import catalog_payload, get_action
 from .chat import (
     conversation_payloads,
@@ -52,6 +57,7 @@ from .models import (
     AppSetting,
     Archive,
     AuditLog,
+    AutomationRule,
     ConversationRead,
     Event,
     GifLibraryItem,
@@ -82,6 +88,7 @@ from .schemas import (
     AccountUpdate,
     ActionInvoke,
     ApiKeyCreate,
+    ChatAutomationMentionStickerUpdate,
     ChatForwardCreate,
     ChatFriendActionCreate,
     ChatGifImportCreate,
@@ -411,6 +418,87 @@ def _chat_sticker_catalog(
         "favorite_count": len(favorites),
         "recent_count": len(recent),
         "source": "Lịch sử Listener và sticker đã gửi từ ZChat",
+    }
+
+
+def _chat_automation_group_options(
+    session: Session,
+    account: ZaloAccount,
+) -> list[dict]:
+    groups = {
+        str(group_id): {
+            "thread_id": str(group_id),
+            "name": _contact_text(metadata.get("name"))
+            or f"Nhóm Zalo • {str(group_id)[-6:]}",
+            "avatar_url": _contact_text(
+                metadata.get("avatar_url") or metadata.get("avatar")
+            ),
+            "member_count": metadata.get("member_count"),
+        }
+        for group_id, metadata in group_metadata(session, account.id).items()
+        if isinstance(metadata, dict)
+    }
+    for conversation in conversation_payloads(session, account, limit=250):
+        if conversation.get("thread_type") != "group":
+            continue
+        thread_id = str(conversation.get("thread_id") or "").strip()
+        if not thread_id:
+            continue
+        current = groups.setdefault(
+            thread_id,
+            {
+                "thread_id": thread_id,
+                "name": f"Nhóm Zalo • {thread_id[-6:]}",
+                "avatar_url": None,
+                "member_count": None,
+            },
+        )
+        if conversation.get("name"):
+            current["name"] = conversation["name"]
+        if conversation.get("avatar_url"):
+            current["avatar_url"] = conversation["avatar_url"]
+        if conversation.get("member_count") is not None:
+            current["member_count"] = conversation["member_count"]
+    return sorted(
+        groups.values(),
+        key=lambda item: str(item["name"]).casefold(),
+    )
+
+
+def _mention_sticker_rule(
+    session: Session,
+    account_id: str,
+) -> AutomationRule | None:
+    return session.scalar(
+        select(AutomationRule).where(
+            AutomationRule.account_id == account_id,
+            AutomationRule.kind == MENTION_STICKER_KIND,
+        )
+    )
+
+
+def _mention_sticker_automation_payload(
+    session: Session,
+    account: ZaloAccount,
+) -> dict:
+    rule = _mention_sticker_rule(session, account.id)
+    groups = _chat_automation_group_options(session, account)
+    rule_payload = automation_rule_payload(session, rule, account=account)
+    selected = set(rule_payload.get("group_ids") or [])
+    known = {item["thread_id"] for item in groups}
+    for missing_id in sorted(selected - known):
+        groups.append(
+            {
+                "thread_id": missing_id,
+                "name": f"Nhóm Zalo • {missing_id[-6:]}",
+                "avatar_url": None,
+                "member_count": None,
+                "unavailable": True,
+            }
+        )
+    return {
+        "rule": rule_payload,
+        "groups": groups,
     }
 
 
@@ -1471,6 +1559,8 @@ def cancel_queued_job(
         raise HTTPException(status_code=404, detail="Job not found")
     if not cancel_job(session, job):
         raise HTTPException(status_code=409, detail="Only queued jobs can be cancelled")
+    mark_automation_run(session, job.id, "cancelled")
+    session.commit()
     write_audit(
         session,
         principal=principal,
@@ -1495,6 +1585,8 @@ def retry_failed_job(
         raise HTTPException(status_code=404, detail="Job not found")
     if not retry_job(session, job):
         raise HTTPException(status_code=409, detail="Only failed or cancelled jobs can be retried")
+    mark_automation_run(session, job.id, "queued")
+    session.commit()
     write_audit(
         session,
         principal=principal,
@@ -1857,6 +1949,105 @@ def update_chat_sticker_preferences(
         account_id=body.account_id,
         principal=principal,
     )
+
+
+@router.get("/chat/automations/mention-sticker")
+def get_chat_mention_sticker_automation(
+    account_id: str,
+    session: Session = Depends(get_db),
+    _: Principal = Depends(require_scope("read")),
+) -> dict:
+    account = session.get(ZaloAccount, account_id)
+    if account is None:
+        raise HTTPException(status_code=404, detail="Account not found")
+    return _mention_sticker_automation_payload(session, account)
+
+
+@router.put("/chat/automations/mention-sticker")
+def update_chat_mention_sticker_automation(
+    body: ChatAutomationMentionStickerUpdate,
+    request: Request,
+    session: Session = Depends(get_db),
+    principal: Principal = Depends(require_scope("accounts:write")),
+    _: None = Depends(verify_csrf),
+) -> dict:
+    account = session.get(ZaloAccount, body.account_id)
+    if account is None:
+        raise HTTPException(status_code=404, detail="Account not found")
+    if body.enabled and body.trigger_direct_mention and not account.zalo_uid:
+        raise HTTPException(
+            status_code=409,
+            detail="Hãy kiểm tra phiên Zalo để đồng bộ UID trước khi bật tag tên bạn.",
+        )
+
+    known_groups = {
+        item["thread_id"]
+        for item in _chat_automation_group_options(session, account)
+    }
+    unknown_groups = sorted(set(body.group_ids) - known_groups)
+    if unknown_groups:
+        raise HTTPException(
+            status_code=422,
+            detail="Một hoặc nhiều nhóm đã chọn không còn trong danh sách Zalo.",
+        )
+
+    sticker = _sticker_snapshot(body.sticker.model_dump())
+    if sticker is None:
+        raise HTTPException(status_code=422, detail="Sticker đã chọn không hợp lệ")
+    sticker_config = {
+        key: sticker[key]
+        for key in (
+            "sticker_id",
+            "category_id",
+            "sticker_type",
+            "thumbnail_url",
+            "width",
+            "height",
+        )
+    }
+    config = {
+        "group_ids": body.group_ids,
+        "trigger_direct_mention": body.trigger_direct_mention,
+        "trigger_mention_all": body.trigger_mention_all,
+        "sticker": sticker_config,
+        "cooldown_seconds": body.cooldown_seconds,
+        "consecutive_failures": 0,
+    }
+    rule = _mention_sticker_rule(session, account.id)
+    if rule is None:
+        rule = AutomationRule(
+            account_id=account.id,
+            kind=MENTION_STICKER_KIND,
+            name="Tag nhóm → Sticker",
+            enabled=body.enabled,
+            config=config,
+            created_by_id=principal.id if principal.kind == "user" else None,
+        )
+        session.add(rule)
+    else:
+        rule.enabled = body.enabled
+        rule.config = config
+        rule.created_by_id = principal.id if principal.kind == "user" else None
+    session.commit()
+    session.refresh(rule)
+    write_audit(
+        session,
+        principal=principal,
+        action="chat.automation.mention_sticker.update",
+        resource_type="automation_rule",
+        resource_id=rule.id,
+        details={
+            "account_id": account.id,
+            "enabled": rule.enabled,
+            "group_ids": body.group_ids,
+            "trigger_direct_mention": body.trigger_direct_mention,
+            "trigger_mention_all": body.trigger_mention_all,
+            "sticker_key": sticker["key"],
+            "cooldown_seconds": body.cooldown_seconds,
+        },
+        request=request,
+    )
+    return _mention_sticker_automation_payload(session, account)
 
 
 @router.get("/chat/gifs")

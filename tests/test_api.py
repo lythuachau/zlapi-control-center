@@ -11,6 +11,7 @@ from sqlalchemy import select
 from control_center.auth import require_short_lived_scope
 from control_center.models import (
     AuditLog,
+    AutomationRule,
     Event,
     GifLibraryItem,
     Job,
@@ -1984,6 +1985,135 @@ def test_chat_group_management_requires_admin_confirmation_and_filters_members(
     assert operator_chat.status_code == 200
     assert 'data-can-manage-groups="false"' in operator_chat.text
     assert 'id="chat-group-manage-open"' not in operator_chat.text
+
+
+def test_admin_configures_group_mention_sticker_automation(client: TestClient):
+    csrf = login(client)
+    account_id = client.post(
+        "/api/v1/accounts",
+        headers={"X-CSRF-Token": csrf},
+        json={
+            "name": "Automation UI account",
+            "imei": "imei-automation-account-12345",
+            "cookies": {"zpw_sek": "automation-secret"},
+            "listener_enabled": True,
+        },
+    ).json()["id"]
+    with client.app.state.database.session_factory() as session:
+        account = session.get(ZaloAccount, account_id)
+        account.status = "online"
+        account.zalo_uid = "automation-self-uid"
+        session.add(
+            Event(
+                account_id=account_id,
+                event_type="group.metadata.synced",
+                payload={
+                    "groups": {
+                        "group-automation-1": {
+                            "name": "Nhóm thử tự động hóa",
+                            "avatar_url": "https://example.com/group.jpg",
+                            "member_count": 24,
+                        }
+                    }
+                },
+            )
+        )
+        session.commit()
+
+    empty = client.get(
+        "/api/v1/chat/automations/mention-sticker",
+        params={"account_id": account_id},
+    )
+    assert empty.status_code == 200
+    assert empty.json()["rule"]["enabled"] is False
+    assert empty.json()["groups"][0]["thread_id"] == "group-automation-1"
+
+    configured = client.put(
+        "/api/v1/chat/automations/mention-sticker",
+        headers={"X-CSRF-Token": csrf},
+        json={
+            "account_id": account_id,
+            "enabled": True,
+            "group_ids": ["group-automation-1"],
+            "trigger_direct_mention": True,
+            "trigger_mention_all": True,
+            "cooldown_seconds": 60,
+            "sticker": {
+                "sticker_id": "15526",
+                "category_id": "234",
+                "sticker_type": 1,
+                "thumbnail_url": (
+                    "https://zalo-api.zadn.vn/api/emoticon/sticker/"
+                    "webpc?eid=15526&size=130"
+                ),
+                "width": 130,
+                "height": 130,
+            },
+        },
+    )
+    assert configured.status_code == 200
+    rule = configured.json()["rule"]
+    assert rule["enabled"] is True
+    assert rule["account_ready"] is True
+    assert rule["group_ids"] == ["group-automation-1"]
+    assert rule["cooldown_seconds"] == 60
+
+    invalid_group = client.put(
+        "/api/v1/chat/automations/mention-sticker",
+        headers={"X-CSRF-Token": csrf},
+        json={
+            "account_id": account_id,
+            "enabled": True,
+            "group_ids": ["group-not-known"],
+            "trigger_direct_mention": True,
+            "trigger_mention_all": False,
+            "cooldown_seconds": 30,
+            "sticker": {
+                "sticker_id": "15526",
+                "category_id": "234",
+                "sticker_type": 1,
+                "thumbnail_url": "https://example.com/sticker.webp",
+                "width": 130,
+                "height": 130,
+            },
+        },
+    )
+    assert invalid_group.status_code == 422
+
+    with client.app.state.database.session_factory() as session:
+        stored = session.scalar(
+            select(AutomationRule).where(AutomationRule.account_id == account_id)
+        )
+        assert stored is not None
+        assert stored.config["group_ids"] == ["group-automation-1"]
+        admin = session.scalar(select(User).where(User.username == "admin"))
+        admin.role = "operator"
+        session.commit()
+
+    operator_chat = client.get("/chat")
+    assert operator_chat.status_code == 200
+    assert 'data-can-manage-automations="false"' in operator_chat.text
+    forbidden = client.put(
+        "/api/v1/chat/automations/mention-sticker",
+        headers={"X-CSRF-Token": csrf},
+        json={
+            "account_id": account_id,
+            "enabled": False,
+            "group_ids": ["group-automation-1"],
+            "trigger_direct_mention": True,
+            "trigger_mention_all": False,
+            "cooldown_seconds": 30,
+            "sticker": {
+                "sticker_id": "15526",
+                "category_id": "234",
+                "sticker_type": 1,
+                "thumbnail_url": "https://example.com/sticker.webp",
+                "width": 130,
+                "height": 130,
+            },
+        },
+    )
+    assert forbidden.status_code == 403
 
 
 def test_chat_media_upload_signed_preview_and_queue(client: TestClient):

@@ -54,6 +54,26 @@ class FakeMediaClient:
         )
         return {"sent": "sticker"}
 
+    def sendCustomSticker(
+        self,
+        static_url,
+        animation_url,
+        thread_id,
+        thread_type,
+        **kwargs,
+    ):
+        self.calls.append(
+            (
+                "custom-sticker",
+                static_url,
+                animation_url,
+                thread_id,
+                thread_type,
+                kwargs,
+            )
+        )
+        return {"sent": "custom-sticker"}
+
     def sendLink(self, url, title, thread_id, thread_type, **kwargs):
         self.calls.append(("link", url, title, thread_id, thread_type, kwargs))
         return {"sent": "link"}
@@ -341,6 +361,53 @@ def test_connector_sends_rich_media_and_audio(settings):
     assert client.calls[5][1].startswith(
         f"http://zlapi.example.test/media/outbound/{'f' * 32}"
     )
+    database.dispose()
+
+
+def test_connector_replies_to_source_message_with_automation_sticker(settings):
+    database = Database(settings)
+    database.create_schema()
+    client = FakeMediaClient()
+    connector = ZaloConnector(settings, object())
+    connector.client_for = lambda _account: client
+
+    with database.session_factory() as session:
+        account = ZaloAccount(
+            name="Automation connector",
+            cookie_cipher="unused",
+            imei_cipher="unused",
+            status="online",
+            enabled=True,
+        )
+        session.add(account)
+        session.flush()
+        result = connector.send_chat_automation_sticker(
+            session,
+            account,
+            {
+                "thread_id": "group-123",
+                "thread_type": "group",
+                "reply_message_id": "message-456",
+                "media": {
+                    "thumbnail_url": "https://example.com/sticker.webp",
+                    "width": 140,
+                    "height": 120,
+                },
+            },
+        )
+
+    assert result["automation"] is True
+    assert result["reply_message_id"] == "message-456"
+    assert len(client.calls) == 1
+    call = client.calls[0]
+    assert call[:4] == (
+        "custom-sticker",
+        "https://example.com/sticker.webp",
+        "https://example.com/sticker.webp",
+        "group-123",
+    )
+    assert call[4].name == "GROUP"
+    assert call[5] == {"reply": "message-456", "width": 140, "height": 120}
     database.dispose()
 
 

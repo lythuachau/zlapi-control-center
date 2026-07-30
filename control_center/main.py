@@ -476,6 +476,7 @@ def create_app(
             can_manage_gif_library=context["user"].role in {"admin", "super_admin"},
             can_manage_groups=context["user"].role in {"admin", "super_admin"},
             can_manage_friends=context["user"].role in {"admin", "super_admin"},
+            can_manage_automations=context["user"].role in {"admin", "super_admin"},
             max_upload_mb=settings.max_upload_mb,
         )
         return templates.TemplateResponse(

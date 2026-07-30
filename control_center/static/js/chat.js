@@ -24,6 +24,13 @@
     tasksFilter: "all",
     tasksPollTimer: null,
     tasksRequestId: 0,
+    automationRule: null,
+    automationGroups: [],
+    automationSelectedGroups: new Set(),
+    automationSticker: null,
+    automationGroupSearch: "",
+    automationRequestId: 0,
+    automationSaving: false,
     groupInfo: null,
     groupInfoThreadId: "",
     groupMembersSearch: "",
@@ -57,6 +64,7 @@
     canManageJobs: app.dataset.canManageJobs === "true",
     canManageGroups: app.dataset.canManageGroups === "true",
     canManageFriends: app.dataset.canManageFriends === "true",
+    canManageAutomations: app.dataset.canManageAutomations === "true",
     reloadTimer: null,
     messageReloadTimer: null,
     messageRequestId: 0,
@@ -114,6 +122,19 @@
   const contactsRefresh = $("#chat-contacts-refresh");
   const themePanel = $("#chat-theme-panel");
   const automationPanel = $("#chat-automation-panel");
+  const automationEnabled = $("#chat-automation-enabled");
+  const automationDirect = $("#chat-automation-direct");
+  const automationAll = $("#chat-automation-all");
+  const automationNotice = $("#chat-automation-notice");
+  const automationGroupSearch = $("#chat-automation-group-search");
+  const automationGroupCount = $("#chat-automation-group-count");
+  const automationGroups = $("#chat-automation-groups");
+  const automationStickerStatus = $("#chat-automation-sticker-status");
+  const automationStickerSelected = $("#chat-automation-sticker-selected");
+  const automationStickers = $("#chat-automation-stickers");
+  const automationCooldown = $("#chat-automation-cooldown");
+  const automationSave = $("#chat-automation-save");
+  const automationFootnote = $("#chat-automation-footnote");
   const tasksList = $("#chat-tasks-list");
   const tasksFilter = $("#chat-tasks-filter");
   const tasksStatus = $("#chat-tasks-status");
@@ -814,6 +835,7 @@
       label: `Sticker ${sticker.sticker_id}`,
     });
     renderStickerCatalog();
+    renderAutomationStickers();
   }
 
   function visibleStickers() {
@@ -905,6 +927,7 @@
       item.favorite = state.stickerFavoriteKeys.has(stickerKey(item));
     }
     renderStickerCatalog();
+    renderAutomationStickers();
     if (stickerStatus) {
       stickerStatus.textContent = state.stickerCatalog.length
         ? `${state.stickerCatalog.length} sticker · ${state.stickerFavoriteKeys.size} yêu thích`
@@ -1716,6 +1739,282 @@
     contactsList.replaceChildren(...items.map(renderContact));
   }
 
+  function setAutomationNotice(message, tone = "") {
+    if (!automationNotice) return;
+    automationNotice.textContent = message;
+    automationNotice.dataset.tone = tone;
+  }
+
+  function renderAutomationGroups() {
+    if (!automationGroups) return;
+    const term = state.automationGroupSearch.toLocaleLowerCase("vi");
+    const visible = state.automationGroups.filter((item) => (
+      !term
+      || `${item.name || ""} ${item.thread_id || ""}`
+        .toLocaleLowerCase("vi")
+        .includes(term)
+    ));
+    if (automationGroupCount) {
+      automationGroupCount.textContent = `${state.automationSelectedGroups.size} nhóm đã chọn`;
+    }
+    if (!visible.length) {
+      const empty = document.createElement("div");
+      empty.className = "zchat-list-empty";
+      empty.textContent = state.automationGroups.length
+        ? "Không tìm thấy nhóm phù hợp."
+        : "Chưa có nhóm nào được Listener đồng bộ.";
+      automationGroups.replaceChildren(empty);
+      return;
+    }
+    const nodes = visible.map((item) => {
+      const button = document.createElement("button");
+      const threadId = String(item.thread_id || "");
+      const selected = state.automationSelectedGroups.has(threadId);
+      button.type = "button";
+      button.className = `zchat-automation-group${selected ? " selected" : ""}`;
+      button.disabled = (
+        !state.canManageAutomations
+        || (Boolean(item.unavailable) && !selected)
+      );
+      button.setAttribute("aria-pressed", String(selected));
+
+      const avatar = document.createElement("span");
+      avatar.className = "zchat-automation-group-avatar";
+      avatar.textContent = initials(item.name || "Nhóm Zalo");
+      if (text(item.avatar_url)) {
+        const image = document.createElement("img");
+        image.src = item.avatar_url;
+        image.alt = "";
+        image.loading = "lazy";
+        image.addEventListener("error", () => image.remove(), { once: true });
+        avatar.append(image);
+      }
+      const copy = document.createElement("span");
+      copy.className = "zchat-automation-group-copy";
+      const name = document.createElement("strong");
+      name.textContent = item.name || `Nhóm Zalo • ${threadId.slice(-6)}`;
+      const meta = document.createElement("small");
+      meta.textContent = item.unavailable
+        ? "Nhóm chưa còn trong dữ liệu đồng bộ"
+        : item.member_count
+          ? `${item.member_count} thành viên`
+          : `ID ${threadId.slice(-10)}`;
+      copy.append(name, meta);
+      const check = document.createElement("span");
+      check.className = "zchat-automation-group-check";
+      check.textContent = "✓";
+      button.append(avatar, copy, check);
+      button.addEventListener("click", () => {
+        if (selected) state.automationSelectedGroups.delete(threadId);
+        else state.automationSelectedGroups.add(threadId);
+        renderAutomationGroups();
+      });
+      return button;
+    });
+    automationGroups.replaceChildren(...nodes);
+  }
+
+  function renderAutomationStickerSelection() {
+    if (!automationStickerSelected || !automationStickerStatus) return;
+    const sticker = state.automationSticker;
+    if (!sticker) {
+      const placeholder = document.createElement("span");
+      placeholder.textContent = "STK";
+      const copy = document.createElement("p");
+      const name = document.createElement("strong");
+      name.textContent = "Chưa chọn sticker";
+      const hint = document.createElement("small");
+      hint.textContent = "Chọn từ lịch sử hoặc mục yêu thích bên dưới";
+      copy.append(name, hint);
+      automationStickerSelected.replaceChildren(placeholder, copy);
+      automationStickerStatus.textContent = "Chưa chọn";
+      return;
+    }
+    const preview = document.createElement("span");
+    const image = document.createElement("img");
+    image.src = sticker.thumbnail_url;
+    image.alt = "";
+    image.addEventListener("error", () => {
+      preview.textContent = "STK";
+    }, { once: true });
+    preview.append(image);
+    const copy = document.createElement("p");
+    const name = document.createElement("strong");
+    name.textContent = "Sticker Zalo đã chọn";
+    const hint = document.createElement("small");
+    hint.textContent = `Bộ ${sticker.category_id} · Sticker ${sticker.sticker_id}`;
+    copy.append(name, hint);
+    automationStickerSelected.replaceChildren(preview, copy);
+    automationStickerStatus.textContent = `${sticker.category_id}:${sticker.sticker_id}`;
+  }
+
+  function renderAutomationStickers() {
+    if (!automationStickers) return;
+    if (!state.stickerCatalog.length) {
+      const empty = document.createElement("div");
+      empty.className = "zchat-list-empty";
+      empty.textContent = "Chưa có sticker trong lịch sử ZChat.";
+      automationStickers.replaceChildren(empty);
+      renderAutomationStickerSelection();
+      return;
+    }
+    const selectedKey = state.automationSticker
+      ? stickerKey(state.automationSticker)
+      : "";
+    const nodes = state.stickerCatalog.slice(0, 60).map((item) => {
+      const sticker = normalizedSticker(item);
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = `zchat-automation-sticker${
+        sticker && sticker.key === selectedKey ? " selected" : ""
+      }`;
+      button.disabled = !state.canManageAutomations || !sticker;
+      button.title = sticker
+        ? `Chọn sticker ${sticker.category_id}:${sticker.sticker_id}`
+        : "Sticker không hợp lệ";
+      if (sticker) {
+        const image = document.createElement("img");
+        image.src = sticker.thumbnail_url;
+        image.alt = "";
+        image.loading = "lazy";
+        button.append(image);
+        button.addEventListener("click", () => {
+          state.automationSticker = sticker;
+          renderAutomationStickers();
+          renderAutomationStickerSelection();
+        });
+      }
+      return button;
+    });
+    automationStickers.replaceChildren(...nodes);
+    renderAutomationStickerSelection();
+  }
+
+  function applyAutomationPayload(result) {
+    const rule = result?.rule && typeof result.rule === "object" ? result.rule : {};
+    state.automationRule = rule;
+    state.automationGroups = Array.isArray(result?.groups) ? result.groups : [];
+    state.automationSelectedGroups = new Set(
+      (Array.isArray(rule.group_ids) ? rule.group_ids : [])
+        .map((value) => String(value || "").trim())
+        .filter(Boolean),
+    );
+    state.automationSticker = normalizedSticker(rule.sticker);
+    if (
+      state.automationSticker
+      && !state.stickerCatalog.some(
+        (item) => stickerKey(item) === stickerKey(state.automationSticker),
+      )
+    ) {
+      state.stickerCatalog.unshift(state.automationSticker);
+    }
+    if (automationEnabled) automationEnabled.checked = Boolean(rule.enabled);
+    if (automationDirect) automationDirect.checked = rule.trigger_direct_mention !== false;
+    if (automationAll) automationAll.checked = rule.trigger_mention_all !== false;
+    if (automationCooldown) automationCooldown.value = String(rule.cooldown_seconds || 30);
+    renderAutomationGroups();
+    renderAutomationStickers();
+
+    if (!state.canManageAutomations) {
+      setAutomationNotice("Bạn có thể xem cấu hình; chỉ Admin mới được thay đổi.", "warning");
+    } else if (rule.enabled && rule.account_ready) {
+      setAutomationNotice("Quy tắc đang hoạt động · Listener sẵn sàng nhận tag.", "ready");
+    } else if (rule.enabled) {
+      setAutomationNotice("Quy tắc đã bật nhưng đang tạm dừng vì Listener hoặc phiên Zalo chưa sẵn sàng.", "warning");
+    } else if (rule.disabled_reason === "three_consecutive_failures") {
+      setAutomationNotice("Quy tắc đã tự tắt sau ba lần gửi lỗi liên tiếp. Hãy kiểm tra phiên Zalo rồi bật lại.", "error");
+    } else {
+      setAutomationNotice("Quy tắc đang tắt. Cấu hình được giữ lại và không gửi sticker.");
+    }
+    if (automationFootnote) {
+      const succeeded = Number(rule.run_counts?.succeeded) || 0;
+      const suppressed = Number(rule.run_counts?.suppressed) || 0;
+      automationFootnote.textContent = rule.last_triggered_at
+        ? `Đã phản hồi ${succeeded} lần · Bỏ qua an toàn ${suppressed} lần · Lần gần nhất ${formatTime(rule.last_triggered_at)}`
+        : state.canManageAutomations
+          ? "Mỗi tin nhắn chỉ xử lý một lần; ba lỗi liên tiếp sẽ tự tắt quy tắc."
+          : "Chỉ Admin mới có thể thay đổi tự động hóa.";
+    }
+  }
+
+  async function loadAutomation() {
+    if (!state.accountId || !automationPanel) return;
+    const accountId = state.accountId;
+    const requestId = ++state.automationRequestId;
+    setAutomationNotice("Đang đọc cấu hình tự động hóa…");
+    try {
+      const stickerPromise = state.stickerCatalog.length
+        ? Promise.resolve()
+        : loadStickerCatalog();
+      const result = await api(
+        `/api/v1/chat/automations/mention-sticker?account_id=${encodeURIComponent(accountId)}`,
+      );
+      await stickerPromise;
+      if (requestId !== state.automationRequestId || state.accountId !== accountId) return;
+      applyAutomationPayload(result);
+    } catch (error) {
+      if (requestId !== state.automationRequestId) return;
+      setAutomationNotice(error.message, "error");
+      toast(`Không thể tải tự động hóa: ${error.message}`, "error");
+    }
+  }
+
+  async function saveAutomation() {
+    if (!state.canManageAutomations || state.automationSaving) return;
+    const groupIds = [...state.automationSelectedGroups];
+    if (!groupIds.length) {
+      toast("Hãy chọn ít nhất một nhóm Zalo.", "error");
+      return;
+    }
+    if (!automationDirect?.checked && !automationAll?.checked) {
+      toast("Hãy chọn tag tên bạn, @all hoặc cả hai.", "error");
+      return;
+    }
+    if (!state.automationSticker) {
+      toast("Hãy chọn sticker phản hồi.", "error");
+      return;
+    }
+    state.automationSaving = true;
+    if (automationSave) {
+      automationSave.disabled = true;
+      automationSave.textContent = "Đang lưu…";
+    }
+    try {
+      const result = await api("/api/v1/chat/automations/mention-sticker", {
+        method: "PUT",
+        body: JSON.stringify({
+          account_id: state.accountId,
+          enabled: Boolean(automationEnabled?.checked),
+          group_ids: groupIds,
+          trigger_direct_mention: Boolean(automationDirect?.checked),
+          trigger_mention_all: Boolean(automationAll?.checked),
+          sticker: {
+            sticker_id: state.automationSticker.sticker_id,
+            category_id: state.automationSticker.category_id,
+            sticker_type: state.automationSticker.sticker_type,
+            thumbnail_url: state.automationSticker.thumbnail_url,
+            width: state.automationSticker.width,
+            height: state.automationSticker.height,
+          },
+          cooldown_seconds: Number(automationCooldown?.value) || 30,
+        }),
+      });
+      applyAutomationPayload(result);
+      toast(automationEnabled?.checked
+        ? "Đã lưu và bật tự động trả lời sticker."
+        : "Đã lưu quy tắc ở trạng thái tắt.");
+    } catch (error) {
+      setAutomationNotice(error.message, "error");
+      toast(error.message, "error");
+    } finally {
+      state.automationSaving = false;
+      if (automationSave) {
+        automationSave.disabled = !state.canManageAutomations;
+        automationSave.textContent = "Lưu quy tắc";
+      }
+    }
+  }
+
   function setNavigation(nav) {
     state.nav = ["contacts", "theme", "automation"].includes(nav) ? nav : "messages";
     $$("[data-chat-nav]").forEach((item) => {
@@ -1748,6 +2047,7 @@
       renderContacts();
       void loadContacts();
     }
+    if (automationActive) void loadAutomation();
   }
 
   function openContactConversation(contact) {
@@ -4378,7 +4678,14 @@
     state.stickerRequestId += 1;
     state.tasks = [];
     state.tasksRequestId += 1;
+    state.automationRule = null;
+    state.automationGroups = [];
+    state.automationSelectedGroups.clear();
+    state.automationSticker = null;
+    state.automationGroupSearch = "";
+    state.automationRequestId += 1;
     if (contactsSearch) contactsSearch.value = "";
+    if (automationGroupSearch) automationGroupSearch.value = "";
     if (contactsStatus) contactsStatus.textContent = "Chưa đồng bộ danh bạ.";
     if (tasksStatus) tasksStatus.textContent = "Đang tải tác vụ…";
     state.activeThread = null;
@@ -5088,6 +5395,11 @@
       if (envelope.account_id !== state.accountId) return;
       scheduleMessageReload(String(envelope.thread_id || ""));
     });
+    stream.addEventListener("automation.triggered", (event) => {
+      const envelope = JSON.parse(event.data);
+      if (envelope.account_id !== state.accountId || state.nav !== "automation") return;
+      void loadAutomation();
+    });
     stream.addEventListener("job.succeeded", (event) => {
       const envelope = JSON.parse(event.data);
       if (envelope.account_id !== state.accountId) return;
@@ -5110,6 +5422,9 @@
       if (action === "fetchAllFriends" && state.nav === "contacts") {
         window.clearTimeout(state.contactsPollTimer);
         void loadContacts();
+      }
+      if (action === "__chat_automation_sticker__" && state.nav === "automation") {
+        void loadAutomation();
       }
       if (["sendFriendRequest", "acceptFriendRequest", "blockUser", "unblockUser"].includes(action)) {
         const pending = state.friendActionJobs.get(envelope.payload.job_id);
@@ -5228,6 +5543,9 @@
       if (action === "fetchAllFriends" && state.nav === "contacts") {
         window.clearTimeout(state.contactsPollTimer);
         void loadContacts();
+      }
+      if (action === "__chat_automation_sticker__" && state.nav === "automation") {
+        void loadAutomation();
       }
       if (["sendFriendRequest", "acceptFriendRequest", "blockUser", "unblockUser"].includes(action)) {
         const pending = state.friendActionJobs.get(envelope.payload.job_id);
@@ -5356,6 +5674,13 @@
   });
   contactsRefresh?.addEventListener("click", () => {
     void loadContacts({ sync: true });
+  });
+  automationGroupSearch?.addEventListener("input", (event) => {
+    state.automationGroupSearch = event.target.value;
+    renderAutomationGroups();
+  });
+  automationSave?.addEventListener("click", () => {
+    void saveAutomation();
   });
   tasksFilter?.addEventListener("change", (event) => {
     state.tasksFilter = event.target.value;

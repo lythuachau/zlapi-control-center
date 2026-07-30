@@ -12,6 +12,7 @@ from sqlalchemy.exc import IntegrityError
 
 from zlapi import ThreadType, ZaloAPI
 
+from .automations import queue_mention_sticker_automation
 from .config import get_settings
 from .connector import jsonable
 from .db import Database
@@ -149,29 +150,46 @@ def store_listener_event(
                 _mark_account_online(session, account_id)
                 session.commit()
                 return False
-        session.add(
-            Event(
-                account_id=account_id,
-                event_type=event_type,
-                thread_id=normalized_thread_id,
-                dedupe_key=dedupe_key,
-                payload=normalized_payload,
-            )
+        event = Event(
+            account_id=account_id,
+            event_type=event_type,
+            thread_id=normalized_thread_id,
+            dedupe_key=dedupe_key,
+            payload=normalized_payload,
         )
-        _mark_account_online(session, account_id)
-        if event_type == "message.received":
-            account = session.get(ZaloAccount, account_id)
-            if account:
-                try:
-                    with session.begin_nested():
-                        queue_interaction_profile_sync(session, account, normalized_payload)
-                except Exception as exc:
-                    logger.warning(
-                        "Could not queue interaction profile sync for account %s: %s",
-                        account_id,
-                        exc,
-                    )
+        session.add(event)
         try:
+            session.flush()
+            _mark_account_online(session, account_id)
+            if event_type == "message.received":
+                account = session.get(ZaloAccount, account_id)
+                if account:
+                    try:
+                        with session.begin_nested():
+                            queue_mention_sticker_automation(
+                                session,
+                                account,
+                                event,
+                            )
+                    except Exception as exc:
+                        logger.warning(
+                            "Could not evaluate chat automation for account %s: %s",
+                            account_id,
+                            exc,
+                        )
+                    try:
+                        with session.begin_nested():
+                            queue_interaction_profile_sync(
+                                session,
+                                account,
+                                normalized_payload,
+                            )
+                    except Exception as exc:
+                        logger.warning(
+                            "Could not queue interaction profile sync for account %s: %s",
+                            account_id,
+                            exc,
+                        )
             session.commit()
             return True
         except IntegrityError:

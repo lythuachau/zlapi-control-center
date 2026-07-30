@@ -1,7 +1,7 @@
 {% extends "base.html" %}
 
 {% block head %}
-  <link rel="stylesheet" href="{{ url_for('static', path='/css/chat.css') }}?v=20260730-themes-2">
+  <link rel="stylesheet" href="{{ url_for('static', path='/css/chat.css') }}?v=20260730-automation-1">
 {% endblock %}
 
 {% block content %}
@@ -14,6 +14,7 @@
   data-can-manage-gif-library="{{ 'true' if can_manage_gif_library else 'false' }}"
   data-can-manage-groups="{{ 'true' if can_manage_groups else 'false' }}"
   data-can-manage-friends="{{ 'true' if can_manage_friends else 'false' }}"
+  data-can-manage-automations="{{ 'true' if can_manage_automations else 'false' }}"
   data-max-upload-mb="{{ max_upload_mb }}"
 >
   <header class="zchat-topbar">
@@ -178,13 +179,90 @@
       </div>
 
       <div class="zchat-automation-panel" id="chat-automation-panel" hidden>
-        <div class="zchat-automation-empty">
+        <div class="zchat-automation-heading">
           <span class="zchat-automation-icon" aria-hidden="true">⌁</span>
-          <small>KHÔNG GIAN ĐANG CHỜ</small>
-          <strong>Tự động hóa</strong>
-          <p>Chức năng sẽ được xây dựng theo chỉ thị tiếp theo của bạn.</p>
-          <span class="zchat-automation-state"><i></i> Chưa có quy trình nào được kích hoạt</span>
+          <span>
+            <small>QUY TẮC MẶC ĐỊNH</small>
+            <strong>Tag nhóm → Sticker</strong>
+          </span>
+          <label class="zchat-automation-switch" title="Bật hoặc tắt quy tắc">
+            <input id="chat-automation-enabled" type="checkbox" {% if not can_manage_automations %}disabled{% endif %}>
+            <span></span>
+          </label>
         </div>
+
+        <div class="zchat-automation-notice" id="chat-automation-notice">
+          Đang đọc cấu hình tự động hóa…
+        </div>
+
+        <section class="zchat-automation-section">
+          <header>
+            <span><b>1</b><strong>Khi nào phản hồi?</strong></span>
+            <small>Chọn ít nhất một điều kiện</small>
+          </header>
+          <label class="zchat-automation-check">
+            <input id="chat-automation-direct" type="checkbox" checked {% if not can_manage_automations %}disabled{% endif %}>
+            <span>
+              <strong>Tag tên tôi</strong>
+              <small>Khi thành viên mention đúng tài khoản đang kết nối</small>
+            </span>
+          </label>
+          <label class="zchat-automation-check">
+            <input id="chat-automation-all" type="checkbox" checked {% if not can_manage_automations %}disabled{% endif %}>
+            <span>
+              <strong>Tag @all</strong>
+              <small>Khi tin nhắn mention toàn bộ thành viên nhóm</small>
+            </span>
+          </label>
+        </section>
+
+        <section class="zchat-automation-section">
+          <header>
+            <span><b>2</b><strong>Áp dụng trong nhóm</strong></span>
+            <small id="chat-automation-group-count">0 nhóm đã chọn</small>
+          </header>
+          <label class="zchat-automation-search">
+            <span>⌕</span>
+            <input id="chat-automation-group-search" type="search" placeholder="Tìm nhóm Zalo…" autocomplete="off">
+          </label>
+          <div class="zchat-automation-groups" id="chat-automation-groups">
+            <div class="zchat-list-loading"><i></i><i></i><i></i></div>
+          </div>
+        </section>
+
+        <section class="zchat-automation-section">
+          <header>
+            <span><b>3</b><strong>Sticker phản hồi</strong></span>
+            <small id="chat-automation-sticker-status">Chưa chọn</small>
+          </header>
+          <div class="zchat-automation-sticker-selected" id="chat-automation-sticker-selected">
+            <span>STK</span>
+            <p><strong>Chưa chọn sticker</strong><small>Chọn từ lịch sử hoặc mục yêu thích bên dưới</small></p>
+          </div>
+          <div class="zchat-automation-stickers" id="chat-automation-stickers"></div>
+        </section>
+
+        <section class="zchat-automation-section compact">
+          <header>
+            <span><b>4</b><strong>Khoảng nghỉ an toàn</strong></span>
+          </header>
+          <label class="zchat-automation-cooldown">
+            <select id="chat-automation-cooldown" {% if not can_manage_automations %}disabled{% endif %}>
+              <option value="15">15 giây</option>
+              <option value="30" selected>30 giây</option>
+              <option value="60">1 phút</option>
+              <option value="300">5 phút</option>
+            </select>
+            <small>Tag đến trong khoảng nghỉ sẽ được bỏ qua để tránh spam.</small>
+          </label>
+        </section>
+
+        <button class="zchat-automation-save" id="chat-automation-save" type="button" {% if not can_manage_automations %}disabled{% endif %}>
+          Lưu quy tắc
+        </button>
+        <small class="zchat-automation-footnote" id="chat-automation-footnote">
+          Chỉ Admin mới có thể thay đổi tự động hóa.
+        </small>
       </div>
 
       <div class="zchat-connection-card">
@@ -912,5 +990,5 @@
 {% endblock %}
 
 {% block scripts %}
-  <script defer src="{{ url_for('static', path='/js/chat.js') }}?v=20260730-themes-2"></script>
+  <script defer src="{{ url_for('static', path='/js/chat.js') }}?v=20260730-automation-1"></script>
 {% endblock %}

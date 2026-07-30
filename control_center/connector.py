@@ -1427,6 +1427,51 @@ class ZaloConnector:
             self._record_failure(session, account, exc)
             raise
 
+    def send_chat_automation_sticker(
+        self,
+        session: Session,
+        account: ZaloAccount,
+        payload: dict,
+    ) -> dict:
+        """Reply to a source group message with the configured sticker image."""
+        if not account.enabled:
+            raise RuntimeError("Zalo account is disabled")
+        thread_id = str(payload.get("thread_id") or "").strip()
+        source_message_id = str(payload.get("reply_message_id") or "").strip()
+        media = payload.get("media") if isinstance(payload.get("media"), dict) else {}
+        thumbnail_url = str(media.get("thumbnail_url") or "").strip()
+        parsed = urlsplit(thumbnail_url)
+        if not thread_id or not source_message_id:
+            raise ValueError("Automation sticker requires a group and source message")
+        if self._thread_type(payload.get("thread_type")) != ThreadType.GROUP:
+            raise ValueError("Mention sticker automation only supports groups")
+        if parsed.scheme != "https" or not parsed.netloc:
+            raise ValueError("Automation sticker URL must use HTTPS")
+
+        client = self.client_for(account)
+        _limiter(account.id).wait()
+        try:
+            result = client.sendCustomSticker(
+                thumbnail_url,
+                thumbnail_url,
+                thread_id,
+                ThreadType.GROUP,
+                reply=source_message_id,
+                width=int(media.get("width") or 130),
+                height=int(media.get("height") or 130),
+            )
+            result = ensure_zalo_success(result, "Tự động trả lời sticker")
+            self._record_success(session, account)
+            return {
+                "kind": "sticker",
+                "automation": True,
+                "reply_message_id": source_message_id,
+                "result": result,
+            }
+        except Exception as exc:
+            self._record_failure(session, account, exc)
+            raise
+
     def _prepare_video_upload(
         self,
         session: Session,
