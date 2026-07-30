@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import timedelta
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from sqlalchemy import func, select
@@ -73,6 +74,26 @@ class FakeMediaClient:
             )
         )
         return {"sent": "custom-sticker"}
+
+    def sendReaction(
+        self,
+        message_object,
+        reaction_icon,
+        thread_id,
+        thread_type,
+        **kwargs,
+    ):
+        self.calls.append(
+            (
+                "reaction",
+                message_object.msgId,
+                reaction_icon,
+                thread_id,
+                thread_type,
+                kwargs,
+            )
+        )
+        return {"sent": "reaction"}
 
     def sendLink(self, url, title, thread_id, thread_type, **kwargs):
         self.calls.append(("link", url, title, thread_id, thread_type, kwargs))
@@ -408,6 +429,120 @@ def test_connector_replies_to_source_message_with_automation_sticker(settings):
     )
     assert call[4].name == "GROUP"
     assert call[5] == {"reply": "message-456", "width": 140, "height": 120}
+    database.dispose()
+
+
+def test_connector_sends_requested_automation_reactions_sequentially(
+    settings,
+    monkeypatch,
+):
+    database = Database(settings)
+    database.create_schema()
+    client = FakeMediaClient()
+    connector = ZaloConnector(settings, object())
+    connector.client_for = lambda _account: client
+    monkeypatch.setattr(
+        "control_center.connector._limiter",
+        lambda _account_id: SimpleNamespace(wait=lambda: None),
+    )
+    monkeypatch.setattr("control_center.connector.time.sleep", lambda _seconds: None)
+
+    with database.session_factory() as session:
+        account = ZaloAccount(
+            name="Automation reaction connector",
+            cookie_cipher="unused",
+            imei_cipher="unused",
+            status="online",
+            enabled=True,
+        )
+        session.add(account)
+        session.flush()
+        result = connector.react_to_chat_message(
+            session,
+            account,
+            {
+                "thread_id": "group-456",
+                "thread_type": "group",
+                "messageObject": {
+                    "msgId": "9001",
+                    "cliMsgId": "9002",
+                    "msgType": "webchat",
+                },
+                "reactionIcon": "/-heart",
+                "reactionType": 5,
+                "source": 6,
+                "repeatCount": 4,
+                "_chat_context": {"automation": True, "fallback": "none"},
+            },
+        )
+
+    reaction_calls = [call for call in client.calls if call[0] == "reaction"]
+    assert len(reaction_calls) == 4
+    assert all(call[1:4] == ("9001", "/-heart", "group-456") for call in reaction_calls)
+    assert all(call[4].name == "GROUP" for call in reaction_calls)
+    assert result["requested_count"] == 4
+    assert result["sent_count"] == 4
+    assert len(result["reaction"]) == 4
+    database.dispose()
+
+
+def test_connector_stops_repeated_reactions_after_first_zalo_error(
+    settings,
+    monkeypatch,
+):
+    database = Database(settings)
+    database.create_schema()
+    client = FakeMediaClient()
+    connector = ZaloConnector(settings, object())
+    connector.client_for = lambda _account: client
+    monkeypatch.setattr(
+        "control_center.connector._limiter",
+        lambda _account_id: SimpleNamespace(wait=lambda: None),
+    )
+    monkeypatch.setattr("control_center.connector.time.sleep", lambda _seconds: None)
+    original_send_reaction = client.sendReaction
+
+    def fail_on_third_reaction(*args, **kwargs):
+        result = original_send_reaction(*args, **kwargs)
+        reaction_calls = [call for call in client.calls if call[0] == "reaction"]
+        if len(reaction_calls) == 3:
+            raise RuntimeError("Zalo rejected reaction")
+        return result
+
+    client.sendReaction = fail_on_third_reaction
+
+    with database.session_factory() as session:
+        account = ZaloAccount(
+            name="Failing automation reaction connector",
+            cookie_cipher="unused",
+            imei_cipher="unused",
+            status="online",
+            enabled=True,
+        )
+        session.add(account)
+        session.flush()
+        with pytest.raises(RuntimeError, match="2/4 reaction"):
+            connector.react_to_chat_message(
+                session,
+                account,
+                {
+                    "thread_id": "group-789",
+                    "thread_type": "group",
+                    "messageObject": {
+                        "msgId": "9101",
+                        "cliMsgId": "9102",
+                        "msgType": "webchat",
+                    },
+                    "reactionIcon": "/-heart",
+                    "reactionType": 5,
+                    "source": 6,
+                    "repeatCount": 4,
+                    "_chat_context": {"automation": True, "fallback": "none"},
+                },
+            )
+
+    reaction_calls = [call for call in client.calls if call[0] == "reaction"]
+    assert len(reaction_calls) == 3
     database.dispose()
 
 

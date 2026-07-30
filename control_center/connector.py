@@ -58,6 +58,7 @@ class TokenBucket:
 
 _limiters: dict[str, TokenBucket] = {}
 _limiters_lock = threading.Lock()
+AUTOMATION_REACTION_INTERVAL_SECONDS = 0.8
 
 
 def _limiter(account_id: str) -> TokenBucket:
@@ -1030,28 +1031,44 @@ class ZaloConnector:
     ) -> Any:
         if not account.enabled:
             raise RuntimeError("Zalo account is disabled")
-        _limiter(account.id).wait()
         thread_type = self._thread_type(payload.get("thread_type"))
         message_object = payload.get("messageObject")
         if not isinstance(message_object, dict):
             raise ValueError("Reaction requires a source message object")
         context = payload.get("_chat_context")
         context = context if isinstance(context, dict) else {}
-        client = self.client_for(account)
         try:
-            result = client.sendReaction(
-                MessageObject.fromDict(message_object, None),
-                str(payload.get("reactionIcon") or ""),
-                str(payload.get("thread_id") or ""),
-                thread_type,
-                reactionType=int(payload.get("reactionType", 75)),
-                source=int(payload.get("source", 6)),
-            )
+            repeat_count = int(payload.get("repeatCount") or 1)
+        except (TypeError, ValueError):
+            repeat_count = 1
+        repeat_count = min(max(repeat_count, 1), 5)
+        client = self.client_for(account)
+        results = []
+        try:
+            source_message = MessageObject.fromDict(message_object, None)
+            for index in range(repeat_count):
+                if index:
+                    time.sleep(AUTOMATION_REACTION_INTERVAL_SECONDS)
+                _limiter(account.id).wait()
+                result = client.sendReaction(
+                    source_message,
+                    str(payload.get("reactionIcon") or ""),
+                    str(payload.get("thread_id") or ""),
+                    thread_type,
+                    reactionType=int(payload.get("reactionType", 75)),
+                    source=int(payload.get("source", 6)),
+                )
+                results.append(ensure_zalo_success(result, "Thả reaction"))
             self._record_success(session, account)
-            return {"reaction": jsonable(result), "fallback": None}
+            return {
+                "reaction": results[0] if repeat_count == 1 else results,
+                "fallback": None,
+                "requested_count": repeat_count,
+                "sent_count": len(results),
+            }
         except Exception as reaction_error:
             fallback = str(context.get("fallback") or "none")
-            if fallback == "message" and not context.get("remove"):
+            if not results and fallback == "message" and not context.get("remove"):
                 result = client.sendMessage(
                     Message(text=str(context.get("glyph") or "✨")),
                     str(payload.get("thread_id") or ""),
@@ -1064,12 +1081,17 @@ class ZaloConnector:
                     "fallback_result": jsonable(result),
                     "reaction_error": str(reaction_error),
                 }
-            if fallback == "local" and not context.get("remove"):
+            if not results and fallback == "local" and not context.get("remove"):
                 return {
                     "reaction": None,
                     "fallback": "local",
                     "reaction_error": str(reaction_error),
                 }
+            self._record_failure(session, account, reaction_error)
+            if results:
+                raise RuntimeError(
+                    f"Zalo chỉ nhận {len(results)}/{repeat_count} reaction"
+                ) from reaction_error
             raise
 
     def forward_chat_message(

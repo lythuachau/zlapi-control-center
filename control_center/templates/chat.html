@@ -1,7 +1,7 @@
 {% extends "base.html" %}
 
 {% block head %}
-  <link rel="stylesheet" href="{{ url_for('static', path='/css/chat.css') }}?v=20260730-automation-1">
+  <link rel="stylesheet" href="{{ url_for('static', path='/css/chat.css') }}?v=20260730-automation-2">
 {% endblock %}
 
 {% block content %}
@@ -183,7 +183,7 @@
           <span class="zchat-automation-icon" aria-hidden="true">⌁</span>
           <span>
             <small>QUY TẮC MẶC ĐỊNH</small>
-            <strong>Tag nhóm → Sticker</strong>
+            <strong>Tag nhóm → Phản hồi</strong>
           </span>
           <label class="zchat-automation-switch" title="Bật hoặc tắt quy tắc">
             <input id="chat-automation-enabled" type="checkbox" {% if not can_manage_automations %}disabled{% endif %}>
@@ -232,14 +232,50 @@
 
         <section class="zchat-automation-section">
           <header>
-            <span><b>3</b><strong>Sticker phản hồi</strong></span>
-            <small id="chat-automation-sticker-status">Chưa chọn</small>
+            <span><b>3</b><strong>Hình thức phản hồi</strong></span>
+            <small>Chọn một hành động</small>
           </header>
-          <div class="zchat-automation-sticker-selected" id="chat-automation-sticker-selected">
-            <span>STK</span>
-            <p><strong>Chưa chọn sticker</strong><small>Chọn từ lịch sử hoặc mục yêu thích bên dưới</small></p>
+          <div class="zchat-automation-response-types" role="radiogroup" aria-label="Hình thức phản hồi tự động">
+            <label>
+              <input name="chat-automation-response" type="radio" value="sticker" checked {% if not can_manage_automations %}disabled{% endif %}>
+              <span><b>STK</b><strong>Gửi sticker</strong><small>Trả lời ngay dưới tin được tag</small></span>
+            </label>
+            <label>
+              <input name="chat-automation-response" type="radio" value="reaction" {% if not can_manage_automations %}disabled{% endif %}>
+              <span><b>❤</b><strong>Thả reaction</strong><small>Phản ứng trực tiếp trên tin được tag</small></span>
+            </label>
           </div>
-          <div class="zchat-automation-stickers" id="chat-automation-stickers"></div>
+
+          <div class="zchat-automation-response-panel" id="chat-automation-sticker-panel">
+            <div class="zchat-automation-response-subhead">
+              <strong>Sticker phản hồi</strong>
+              <small id="chat-automation-sticker-status">Chưa chọn</small>
+            </div>
+            <div class="zchat-automation-sticker-selected" id="chat-automation-sticker-selected">
+              <span>STK</span>
+              <p><strong>Chưa chọn sticker</strong><small>Chọn từ lịch sử hoặc mục yêu thích bên dưới</small></p>
+            </div>
+            <div class="zchat-automation-stickers" id="chat-automation-stickers"></div>
+          </div>
+
+          <div class="zchat-automation-response-panel" id="chat-automation-reaction-panel" hidden>
+            <div class="zchat-automation-response-subhead">
+              <strong>Reaction Zalo</strong>
+              <small id="chat-automation-reaction-status">Chưa chọn</small>
+            </div>
+            <div class="zchat-automation-reactions" id="chat-automation-reactions"></div>
+            <label class="zchat-automation-reaction-count">
+              <span><strong>Số lần thả</strong><small>Gửi tuần tự, dừng ngay nếu Zalo từ chối</small></span>
+              <select id="chat-automation-reaction-count" {% if not can_manage_automations %}disabled{% endif %}>
+                <option value="1" selected>1 lần</option>
+                <option value="2">2 lần</option>
+                <option value="3">3 lần</option>
+                <option value="4">4 lần</option>
+                <option value="5">5 lần</option>
+              </select>
+            </label>
+            <small class="zchat-automation-platform-note">Zalo có thể gộp reaction từ cùng một tài khoản tùy phiên bản ứng dụng.</small>
+          </div>
         </section>
 
         <section class="zchat-automation-section compact">
@@ -990,5 +1026,5 @@
 {% endblock %}
 
 {% block scripts %}
-  <script defer src="{{ url_for('static', path='/js/chat.js') }}?v=20260730-automation-1"></script>
+  <script defer src="{{ url_for('static', path='/js/chat.js') }}?v=20260730-automation-2"></script>
 {% endblock %}

@@ -153,6 +153,36 @@ def _safe_sticker(config: dict) -> dict | None:
     }
 
 
+def _safe_reaction(config: dict) -> dict | None:
+    value = config.get("reaction")
+    if not isinstance(value, dict):
+        return None
+    reaction_id = _text(value.get("id")).casefold()
+    glyph = _text(value.get("glyph"))
+    label = _text(value.get("label"))
+    zalo_icon = _text(value.get("zalo_icon"))
+    if (
+        not reaction_id
+        or len(reaction_id) > 40
+        or not glyph
+        or not label
+        or not zalo_icon
+        or value.get("mode") != "native"
+        or value.get("verified") is not True
+    ):
+        return None
+    return {
+        "id": reaction_id,
+        "glyph": glyph[:16],
+        "label": label[:60],
+        "zalo_icon": zalo_icon[:40],
+        "r_type": _bounded_int(value.get("r_type"), 3, 0, 10_000),
+        "source": _bounded_int(value.get("source"), 6, 0, 100),
+        "mode": "native",
+        "verified": True,
+    }
+
+
 def _aware(value: datetime | None) -> datetime | None:
     if value is None or value.tzinfo is not None:
         return value
@@ -237,31 +267,73 @@ def queue_mention_sticker_automation(
         session.flush()
         return run, None
 
-    sticker = _safe_sticker(config)
+    response_type = _text(config.get("response_type")).casefold() or "sticker"
+    sticker = _safe_sticker(config) if response_type == "sticker" else None
+    reaction = _safe_reaction(config) if response_type == "reaction" else None
     source_message_id = _source_message_id(source_event.payload or {})
-    if sticker is None or not source_message_id:
+    message_object = _message_object(source_event.payload or {})
+    if not source_message_id:
         return None, None
-    job = Job(
-        account_id=account.id,
-        action="__chat_automation_sticker__",
-        payload={
-            "thread_id": source_event.thread_id,
-            "thread_type": "group",
-            "kind": "sticker",
-            "media": sticker,
-            "reply_message_id": source_message_id,
-            "automation_rule_id": rule.id,
-            "source_event_id": source_event.id,
-            "_chat_context": {
-                "automation": True,
+    if response_type == "sticker" and sticker is None:
+        return None, None
+    if response_type == "reaction" and (reaction is None or not message_object):
+        return None, None
+    if response_type not in {"sticker", "reaction"}:
+        return None, None
+    reaction_count = _bounded_int(config.get("reaction_count"), 1, 1, 5)
+    action = (
+        "__chat_automation_reaction__"
+        if response_type == "reaction"
+        else "__chat_automation_sticker__"
+    )
+    job_payload = {
+        "thread_id": source_event.thread_id,
+        "thread_type": "group",
+        "automation_rule_id": rule.id,
+        "source_event_id": source_event.id,
+    }
+    if reaction:
+        job_payload.update(
+            {
+                "messageObject": message_object,
+                "reactionIcon": reaction["zalo_icon"],
+                "reactionType": reaction["r_type"],
+                "source": reaction["source"],
+                "repeatCount": reaction_count,
+                "_chat_context": {
+                    "automation": True,
+                    "kind": "reaction",
+                    "target_event_id": source_event.id,
+                    "target_message_id": source_message_id,
+                    "reaction_id": reaction["id"],
+                    "glyph": reaction["glyph"],
+                    "label": reaction["label"],
+                    "remove": False,
+                    "fallback": "none",
+                },
+            }
+        )
+    else:
+        job_payload.update(
+            {
                 "kind": "sticker",
                 "media": sticker,
-                "reply": {
-                    "event_id": source_event.id,
-                    "message_id": source_message_id,
+                "reply_message_id": source_message_id,
+                "_chat_context": {
+                    "automation": True,
+                    "kind": "sticker",
+                    "media": sticker,
+                    "reply": {
+                        "event_id": source_event.id,
+                        "message_id": source_message_id,
+                    },
                 },
-            },
-        },
+            }
+        )
+    job = Job(
+        account_id=account.id,
+        action=action,
+        payload=job_payload,
         created_by_id=None,
         priority=35,
         max_attempts=1,
@@ -277,7 +349,19 @@ def queue_mention_sticker_automation(
         status="queued",
         detail={
             "thread_id": source_event.thread_id,
-            "sticker_key": f"{sticker['category_id']}:{sticker['sticker_id']}",
+            "response_type": response_type,
+            **(
+                {
+                    "reaction_id": reaction["id"],
+                    "reaction_count": reaction_count,
+                }
+                if reaction
+                else {
+                    "sticker_key": (
+                        f"{sticker['category_id']}:{sticker['sticker_id']}"
+                    )
+                }
+            ),
         },
     )
     rule.last_triggered_at = now
@@ -298,6 +382,7 @@ def queue_mention_sticker_automation(
                     "job_id": job.id,
                     "source_event_id": source_event.id,
                     "trigger_kind": trigger_kind,
+                    "response_type": response_type,
                 },
             ),
             AuditLog(
@@ -311,6 +396,7 @@ def queue_mention_sticker_automation(
                     "source_event_id": source_event.id,
                     "job_id": job.id,
                     "trigger_kind": trigger_kind,
+                    "response_type": response_type,
                 },
             ),
         ]
@@ -378,7 +464,7 @@ def automation_rule_payload(
     return {
         "id": rule.id if rule else None,
         "kind": MENTION_STICKER_KIND,
-        "name": rule.name if rule else "Tag nhóm → Sticker",
+        "name": rule.name if rule else "Tag nhóm → Phản hồi",
         "enabled": bool(rule.enabled) if rule else False,
         "account_id": account.id,
         "account_ready": bool(
@@ -390,7 +476,15 @@ def automation_rule_payload(
         "group_ids": list(config.get("group_ids") or []),
         "trigger_direct_mention": bool(config.get("trigger_direct_mention", True)),
         "trigger_mention_all": bool(config.get("trigger_mention_all", True)),
+        "response_type": (
+            _text(config.get("response_type")).casefold()
+            if _text(config.get("response_type")).casefold()
+            in {"sticker", "reaction"}
+            else "sticker"
+        ),
         "sticker": _safe_sticker(config),
+        "reaction": _safe_reaction(config),
+        "reaction_count": _bounded_int(config.get("reaction_count"), 1, 1, 5),
         "cooldown_seconds": _bounded_int(
             config.get("cooldown_seconds"),
             DEFAULT_COOLDOWN_SECONDS,

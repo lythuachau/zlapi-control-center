@@ -154,7 +154,13 @@ class ChatAutomationMentionStickerUpdate(BaseModel):
     group_ids: list[str] = Field(min_length=1, max_length=100)
     trigger_direct_mention: bool = True
     trigger_mention_all: bool = True
-    sticker: ChatStickerPreference
+    response_type: Literal["sticker", "reaction"] = "sticker"
+    sticker: ChatStickerPreference | None = None
+    reaction_id: str | None = Field(
+        default=None,
+        pattern=r"^[a-z0-9][a-z0-9_-]{0,39}$",
+    )
+    reaction_count: int = Field(default=1, ge=1, le=5)
     cooldown_seconds: int = Field(default=30, ge=10, le=3600)
 
     @field_validator("group_ids")
@@ -177,6 +183,10 @@ class ChatAutomationMentionStickerUpdate(BaseModel):
     def at_least_one_trigger(self):
         if not self.trigger_direct_mention and not self.trigger_mention_all:
             raise ValueError("At least one mention trigger is required")
+        if self.response_type == "sticker" and self.sticker is None:
+            raise ValueError("Sticker response requires a sticker")
+        if self.response_type == "reaction" and not self.reaction_id:
+            raise ValueError("Reaction response requires a reaction")
         return self
 
 

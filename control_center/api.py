@@ -499,6 +499,11 @@ def _mention_sticker_automation_payload(
     return {
         "rule": rule_payload,
         "groups": groups,
+        "reactions": [
+            item
+            for item in reaction_catalog(session)
+            if item["mode"] == "native" and item["verified"]
+        ],
     }
 
 
@@ -1991,34 +1996,66 @@ def update_chat_mention_sticker_automation(
             detail="Một hoặc nhiều nhóm đã chọn không còn trong danh sách Zalo.",
         )
 
-    sticker = _sticker_snapshot(body.sticker.model_dump())
-    if sticker is None:
-        raise HTTPException(status_code=422, detail="Sticker đã chọn không hợp lệ")
-    sticker_config = {
-        key: sticker[key]
-        for key in (
-            "sticker_id",
-            "category_id",
-            "sticker_type",
-            "thumbnail_url",
-            "width",
-            "height",
-        )
-    }
+    sticker = None
+    sticker_config = None
+    reaction = None
+    if body.response_type == "sticker":
+        sticker = _sticker_snapshot(body.sticker.model_dump() if body.sticker else {})
+        if sticker is None:
+            raise HTTPException(status_code=422, detail="Sticker đã chọn không hợp lệ")
+        sticker_config = {
+            key: sticker[key]
+            for key in (
+                "sticker_id",
+                "category_id",
+                "sticker_type",
+                "thumbnail_url",
+                "width",
+                "height",
+            )
+        }
+    else:
+        reaction = reaction_by_id(session, body.reaction_id or "")
+        if (
+            reaction is None
+            or reaction["mode"] != "native"
+            or not reaction["verified"]
+        ):
+            raise HTTPException(
+                status_code=422,
+                detail="Reaction này chưa được xác nhận là gửi được trên Zalo",
+            )
     config = {
         "group_ids": body.group_ids,
         "trigger_direct_mention": body.trigger_direct_mention,
         "trigger_mention_all": body.trigger_mention_all,
-        "sticker": sticker_config,
+        "response_type": body.response_type,
+        "reaction_count": body.reaction_count,
         "cooldown_seconds": body.cooldown_seconds,
         "consecutive_failures": 0,
     }
+    if sticker_config:
+        config["sticker"] = sticker_config
+    if reaction:
+        config["reaction"] = {
+            key: reaction[key]
+            for key in (
+                "id",
+                "glyph",
+                "label",
+                "zalo_icon",
+                "r_type",
+                "source",
+                "mode",
+                "verified",
+            )
+        }
     rule = _mention_sticker_rule(session, account.id)
     if rule is None:
         rule = AutomationRule(
             account_id=account.id,
             kind=MENTION_STICKER_KIND,
-            name="Tag nhóm → Sticker",
+            name="Tag nhóm → Phản hồi",
             enabled=body.enabled,
             config=config,
             created_by_id=principal.id if principal.kind == "user" else None,
@@ -2033,7 +2070,7 @@ def update_chat_mention_sticker_automation(
     write_audit(
         session,
         principal=principal,
-        action="chat.automation.mention_sticker.update",
+        action="chat.automation.mention_response.update",
         resource_type="automation_rule",
         resource_id=rule.id,
         details={
@@ -2042,7 +2079,10 @@ def update_chat_mention_sticker_automation(
             "group_ids": body.group_ids,
             "trigger_direct_mention": body.trigger_direct_mention,
             "trigger_mention_all": body.trigger_mention_all,
-            "sticker_key": sticker["key"],
+            "response_type": body.response_type,
+            "sticker_key": sticker["key"] if sticker else None,
+            "reaction_id": reaction["id"] if reaction else None,
+            "reaction_count": body.reaction_count if reaction else None,
             "cooldown_seconds": body.cooldown_seconds,
         },
         request=request,

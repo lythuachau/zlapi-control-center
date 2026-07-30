@@ -27,7 +27,11 @@
     automationRule: null,
     automationGroups: [],
     automationSelectedGroups: new Set(),
+    automationResponseType: "sticker",
     automationSticker: null,
+    automationReactions: [],
+    automationReactionId: "",
+    automationReactionCount: 1,
     automationGroupSearch: "",
     automationRequestId: 0,
     automationSaving: false,
@@ -129,9 +133,15 @@
   const automationGroupSearch = $("#chat-automation-group-search");
   const automationGroupCount = $("#chat-automation-group-count");
   const automationGroups = $("#chat-automation-groups");
+  const automationResponseInputs = $$('[name="chat-automation-response"]');
+  const automationStickerPanel = $("#chat-automation-sticker-panel");
   const automationStickerStatus = $("#chat-automation-sticker-status");
   const automationStickerSelected = $("#chat-automation-sticker-selected");
   const automationStickers = $("#chat-automation-stickers");
+  const automationReactionPanel = $("#chat-automation-reaction-panel");
+  const automationReactionStatus = $("#chat-automation-reaction-status");
+  const automationReactions = $("#chat-automation-reactions");
+  const automationReactionCount = $("#chat-automation-reaction-count");
   const automationCooldown = $("#chat-automation-cooldown");
   const automationSave = $("#chat-automation-save");
   const automationFootnote = $("#chat-automation-footnote");
@@ -1890,16 +1900,81 @@
     renderAutomationStickerSelection();
   }
 
+  function renderAutomationReactions() {
+    if (!automationReactions || !automationReactionStatus) return;
+    if (!state.automationReactions.length) {
+      const empty = document.createElement("div");
+      empty.className = "zchat-list-empty";
+      empty.textContent = "Chưa có reaction Zalo đã xác nhận để sử dụng.";
+      automationReactions.replaceChildren(empty);
+      automationReactionStatus.textContent = "Chưa có reaction";
+      return;
+    }
+    if (!state.automationReactions.some((item) => item.id === state.automationReactionId)) {
+      state.automationReactionId = state.automationReactions[0].id;
+    }
+    const selected = state.automationReactions.find(
+      (item) => item.id === state.automationReactionId,
+    );
+    const nodes = state.automationReactions.map((item) => {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = `zchat-automation-reaction${
+        item.id === state.automationReactionId ? " selected" : ""
+      }`;
+      button.disabled = !state.canManageAutomations;
+      button.textContent = item.glyph;
+      button.title = `${item.label} · Reaction Zalo đã xác nhận`;
+      button.setAttribute("aria-label", `Chọn reaction ${item.label}`);
+      button.setAttribute(
+        "aria-pressed",
+        String(item.id === state.automationReactionId),
+      );
+      button.addEventListener("click", () => {
+        state.automationReactionId = item.id;
+        renderAutomationReactions();
+      });
+      return button;
+    });
+    automationReactions.replaceChildren(...nodes);
+    automationReactionStatus.textContent = selected
+      ? `${selected.glyph} ${selected.label}`
+      : "Chưa chọn";
+  }
+
+  function setAutomationResponseType(value) {
+    state.automationResponseType = value === "reaction" ? "reaction" : "sticker";
+    for (const input of automationResponseInputs) {
+      input.checked = input.value === state.automationResponseType;
+    }
+    if (automationStickerPanel) {
+      automationStickerPanel.hidden = state.automationResponseType !== "sticker";
+    }
+    if (automationReactionPanel) {
+      automationReactionPanel.hidden = state.automationResponseType !== "reaction";
+    }
+    if (state.automationResponseType === "reaction") renderAutomationReactions();
+    else renderAutomationStickers();
+  }
+
   function applyAutomationPayload(result) {
     const rule = result?.rule && typeof result.rule === "object" ? result.rule : {};
     state.automationRule = rule;
     state.automationGroups = Array.isArray(result?.groups) ? result.groups : [];
+    state.automationReactions = Array.isArray(result?.reactions)
+      ? result.reactions.filter((item) => item?.mode === "native" && item?.verified)
+      : [];
     state.automationSelectedGroups = new Set(
       (Array.isArray(rule.group_ids) ? rule.group_ids : [])
         .map((value) => String(value || "").trim())
         .filter(Boolean),
     );
     state.automationSticker = normalizedSticker(rule.sticker);
+    state.automationReactionId = String(rule.reaction?.id || "");
+    state.automationReactionCount = Math.min(
+      Math.max(Number(rule.reaction_count) || 1, 1),
+      5,
+    );
     if (
       state.automationSticker
       && !state.stickerCatalog.some(
@@ -1912,8 +1987,11 @@
     if (automationDirect) automationDirect.checked = rule.trigger_direct_mention !== false;
     if (automationAll) automationAll.checked = rule.trigger_mention_all !== false;
     if (automationCooldown) automationCooldown.value = String(rule.cooldown_seconds || 30);
+    if (automationReactionCount) {
+      automationReactionCount.value = String(state.automationReactionCount);
+    }
     renderAutomationGroups();
-    renderAutomationStickers();
+    setAutomationResponseType(rule.response_type || "sticker");
 
     if (!state.canManageAutomations) {
       setAutomationNotice("Bạn có thể xem cấu hình; chỉ Admin mới được thay đổi.", "warning");
@@ -1924,7 +2002,7 @@
     } else if (rule.disabled_reason === "three_consecutive_failures") {
       setAutomationNotice("Quy tắc đã tự tắt sau ba lần gửi lỗi liên tiếp. Hãy kiểm tra phiên Zalo rồi bật lại.", "error");
     } else {
-      setAutomationNotice("Quy tắc đang tắt. Cấu hình được giữ lại và không gửi sticker.");
+      setAutomationNotice("Quy tắc đang tắt. Cấu hình được giữ lại và không gửi phản hồi.");
     }
     if (automationFootnote) {
       const succeeded = Number(rule.run_counts?.succeeded) || 0;
@@ -1970,8 +2048,12 @@
       toast("Hãy chọn tag tên bạn, @all hoặc cả hai.", "error");
       return;
     }
-    if (!state.automationSticker) {
+    if (state.automationResponseType === "sticker" && !state.automationSticker) {
       toast("Hãy chọn sticker phản hồi.", "error");
+      return;
+    }
+    if (state.automationResponseType === "reaction" && !state.automationReactionId) {
+      toast("Hãy chọn reaction phản hồi.", "error");
       return;
     }
     state.automationSaving = true;
@@ -1988,20 +2070,29 @@
           group_ids: groupIds,
           trigger_direct_mention: Boolean(automationDirect?.checked),
           trigger_mention_all: Boolean(automationAll?.checked),
-          sticker: {
-            sticker_id: state.automationSticker.sticker_id,
-            category_id: state.automationSticker.category_id,
-            sticker_type: state.automationSticker.sticker_type,
-            thumbnail_url: state.automationSticker.thumbnail_url,
-            width: state.automationSticker.width,
-            height: state.automationSticker.height,
-          },
+          response_type: state.automationResponseType,
+          sticker: state.automationResponseType === "sticker"
+            ? {
+                sticker_id: state.automationSticker.sticker_id,
+                category_id: state.automationSticker.category_id,
+                sticker_type: state.automationSticker.sticker_type,
+                thumbnail_url: state.automationSticker.thumbnail_url,
+                width: state.automationSticker.width,
+                height: state.automationSticker.height,
+              }
+            : null,
+          reaction_id: state.automationResponseType === "reaction"
+            ? state.automationReactionId
+            : null,
+          reaction_count: state.automationResponseType === "reaction"
+            ? Math.min(Math.max(Number(automationReactionCount?.value) || 1, 1), 5)
+            : 1,
           cooldown_seconds: Number(automationCooldown?.value) || 30,
         }),
       });
       applyAutomationPayload(result);
       toast(automationEnabled?.checked
-        ? "Đã lưu và bật tự động trả lời sticker."
+        ? "Đã lưu và bật tự động phản hồi khi được tag."
         : "Đã lưu quy tắc ở trạng thái tắt.");
     } catch (error) {
       setAutomationNotice(error.message, "error");
@@ -4681,7 +4772,11 @@
     state.automationRule = null;
     state.automationGroups = [];
     state.automationSelectedGroups.clear();
+    state.automationResponseType = "sticker";
     state.automationSticker = null;
+    state.automationReactions = [];
+    state.automationReactionId = "";
+    state.automationReactionCount = 1;
     state.automationGroupSearch = "";
     state.automationRequestId += 1;
     if (contactsSearch) contactsSearch.value = "";
@@ -5423,7 +5518,10 @@
         window.clearTimeout(state.contactsPollTimer);
         void loadContacts();
       }
-      if (action === "__chat_automation_sticker__" && state.nav === "automation") {
+      if (
+        ["__chat_automation_sticker__", "__chat_automation_reaction__"].includes(action)
+        && state.nav === "automation"
+      ) {
         void loadAutomation();
       }
       if (["sendFriendRequest", "acceptFriendRequest", "blockUser", "unblockUser"].includes(action)) {
@@ -5544,7 +5642,10 @@
         window.clearTimeout(state.contactsPollTimer);
         void loadContacts();
       }
-      if (action === "__chat_automation_sticker__" && state.nav === "automation") {
+      if (
+        ["__chat_automation_sticker__", "__chat_automation_reaction__"].includes(action)
+        && state.nav === "automation"
+      ) {
         void loadAutomation();
       }
       if (["sendFriendRequest", "acceptFriendRequest", "blockUser", "unblockUser"].includes(action)) {
@@ -5678,6 +5779,17 @@
   automationGroupSearch?.addEventListener("input", (event) => {
     state.automationGroupSearch = event.target.value;
     renderAutomationGroups();
+  });
+  for (const input of automationResponseInputs) {
+    input.addEventListener("change", () => {
+      if (input.checked) setAutomationResponseType(input.value);
+    });
+  }
+  automationReactionCount?.addEventListener("change", (event) => {
+    state.automationReactionCount = Math.min(
+      Math.max(Number(event.target.value) || 1, 1),
+      5,
+    );
   });
   automationSave?.addEventListener("click", () => {
     void saveAutomation();

@@ -62,7 +62,10 @@ class Worker:
             try:
                 if action == "__test_account__":
                     result = self.connector.test_account(session, account)
-                elif action == "__chat_reaction__":
+                elif action in {
+                    "__chat_reaction__",
+                    "__chat_automation_reaction__",
+                }:
                     result = self.connector.react_to_chat_message(
                         session,
                         account,

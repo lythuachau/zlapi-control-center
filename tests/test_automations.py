@@ -25,6 +25,8 @@ def _message_payload(
         "message": content,
         "message_object": {
             "msgId": message_id,
+            "cliMsgId": f"client-{message_id}",
+            "msgType": "webchat",
             "content": content,
             "mentions": mentions
             if mentions is not None
@@ -52,6 +54,28 @@ def _rule_config(*, direct: bool = True, mention_all: bool = False) -> dict:
             "height": 130,
         },
     }
+
+
+def _reaction_rule_config(*, count: int = 3) -> dict:
+    config = _rule_config()
+    config.update(
+        {
+            "response_type": "reaction",
+            "reaction_count": count,
+            "reaction": {
+                "id": "heart",
+                "label": "Yêu thích",
+                "glyph": "❤️",
+                "zalo_icon": "/-heart",
+                "r_type": 5,
+                "source": 6,
+                "mode": "native",
+                "verified": True,
+            },
+        }
+    )
+    config.pop("sticker")
+    return config
 
 
 def test_mention_detection_is_group_only_and_ignores_own_messages():
@@ -202,5 +226,55 @@ def test_listener_mention_all_can_be_enabled_without_direct_mention(settings):
         )
         assert job is not None
         assert job.payload["reply_message_id"] == "mention-all-1"
+
+    database.dispose()
+
+
+def test_listener_queues_configured_reaction_count_for_tagged_message(settings):
+    database = Database(settings)
+    database.create_schema()
+    with database.session_factory() as session:
+        account = ZaloAccount(
+            name="Automation reaction account",
+            zalo_uid="self-uid",
+            cookie_cipher="encrypted-cookie",
+            imei_cipher="encrypted-imei",
+            listener_enabled=True,
+            status="online",
+            enabled=True,
+        )
+        session.add(account)
+        session.flush()
+        session.add(
+            AutomationRule(
+                account_id=account.id,
+                kind=MENTION_STICKER_KIND,
+                name="Tag nhóm → Phản hồi",
+                enabled=True,
+                config=_reaction_rule_config(count=4),
+            )
+        )
+        session.commit()
+        account_id = account.id
+
+    assert store_listener_event(
+        database,
+        account_id,
+        "message.received",
+        _message_payload(message_id="reaction-tag-1"),
+        "group-allowed",
+    )
+    with database.session_factory() as session:
+        job = session.scalar(
+            select(Job).where(Job.action == "__chat_automation_reaction__")
+        )
+        assert job is not None
+        assert job.payload["repeatCount"] == 4
+        assert job.payload["reactionIcon"] == "/-heart"
+        assert job.payload["_chat_context"]["fallback"] == "none"
+        run = session.scalar(select(AutomationRun).where(AutomationRun.job_id == job.id))
+        assert run is not None
+        assert run.detail["response_type"] == "reaction"
+        assert run.detail["reaction_count"] == 4
 
     database.dispose()

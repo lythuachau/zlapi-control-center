@@ -2027,6 +2027,10 @@ def test_admin_configures_group_mention_sticker_automation(client: TestClient):
     assert empty.status_code == 200
     assert empty.json()["rule"]["enabled"] is False
     assert empty.json()["groups"][0]["thread_id"] == "group-automation-1"
+    assert any(
+        item["id"] == "heart" and item["mode"] == "native"
+        for item in empty.json()["reactions"]
+    )
 
     configured = client.put(
         "/api/v1/chat/automations/mention-sticker",
@@ -2057,6 +2061,29 @@ def test_admin_configures_group_mention_sticker_automation(client: TestClient):
     assert rule["account_ready"] is True
     assert rule["group_ids"] == ["group-automation-1"]
     assert rule["cooldown_seconds"] == 60
+    assert rule["response_type"] == "sticker"
+
+    reaction_configured = client.put(
+        "/api/v1/chat/automations/mention-sticker",
+        headers={"X-CSRF-Token": csrf},
+        json={
+            "account_id": account_id,
+            "enabled": True,
+            "group_ids": ["group-automation-1"],
+            "trigger_direct_mention": True,
+            "trigger_mention_all": False,
+            "response_type": "reaction",
+            "reaction_id": "heart",
+            "reaction_count": 4,
+            "cooldown_seconds": 45,
+        },
+    )
+    assert reaction_configured.status_code == 200
+    reaction_rule = reaction_configured.json()["rule"]
+    assert reaction_rule["response_type"] == "reaction"
+    assert reaction_rule["reaction"]["id"] == "heart"
+    assert reaction_rule["reaction_count"] == 4
+    assert reaction_rule["sticker"] is None
 
     invalid_group = client.put(
         "/api/v1/chat/automations/mention-sticker",
@@ -2086,6 +2113,10 @@ def test_admin_configures_group_mention_sticker_automation(client: TestClient):
         )
         assert stored is not None
         assert stored.config["group_ids"] == ["group-automation-1"]
+        assert stored.config["response_type"] == "reaction"
+        assert stored.config["reaction"]["id"] == "heart"
+        assert stored.config["reaction_count"] == 4
+        assert "sticker" not in stored.config
         admin = session.scalar(select(User).where(User.username == "admin"))
         admin.role = "operator"
         session.commit()

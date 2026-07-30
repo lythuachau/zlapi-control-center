@@ -1244,6 +1244,110 @@ body[data-page="chat"] .page > .content {
   color: var(--accent-ink);
 }
 
+.zchat-automation-response-types {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 7px;
+}
+
+.zchat-automation-response-types label {
+  min-width: 0;
+  cursor: pointer;
+}
+
+.zchat-automation-response-types input {
+  position: absolute;
+  opacity: 0;
+  pointer-events: none;
+}
+
+.zchat-automation-response-types label > span {
+  display: grid;
+  min-height: 82px;
+  grid-template-columns: 30px minmax(0, 1fr);
+  grid-template-rows: auto auto;
+  align-content: center;
+  gap: 2px 8px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  padding: 9px;
+  background: var(--field);
+  transition: border-color 160ms ease, background 160ms ease, transform 120ms ease;
+}
+
+.zchat-automation-response-types label > span > b {
+  display: grid;
+  width: 30px;
+  height: 30px;
+  grid-row: 1 / 3;
+  place-items: center;
+  align-self: center;
+  border-radius: 9px;
+  background: var(--muted-panel);
+  color: var(--muted);
+  font-size: 9px;
+}
+
+.zchat-automation-response-types strong,
+.zchat-automation-response-types small {
+  display: block;
+  min-width: 0;
+}
+
+.zchat-automation-response-types strong {
+  align-self: end;
+  font-size: 9px;
+}
+
+.zchat-automation-response-types small {
+  color: var(--muted);
+  font-size: 7px;
+  line-height: 1.35;
+}
+
+.zchat-automation-response-types input:checked + span {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+}
+
+.zchat-automation-response-types input:checked + span > b {
+  background: var(--accent);
+  color: var(--accent-ink);
+}
+
+.zchat-automation-response-types input:focus-visible + span {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.zchat-automation-response-types input:disabled + span {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
+.zchat-automation-response-panel {
+  margin-top: 10px;
+  border-top: 1px solid var(--line);
+  padding-top: 10px;
+}
+
+.zchat-automation-response-subhead {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.zchat-automation-response-subhead strong {
+  font-size: 9px;
+}
+
+.zchat-automation-response-subhead small {
+  color: var(--subtle);
+  font-size: 7px;
+}
+
 .zchat-automation-sticker-selected {
   display: grid;
   grid-template-columns: 52px minmax(0, 1fr);
@@ -1322,6 +1426,78 @@ body[data-page="chat"] .page > .content {
   width: 100%;
   height: 100%;
   object-fit: contain;
+}
+
+.zchat-automation-reactions {
+  display: grid;
+  grid-template-columns: repeat(6, minmax(0, 1fr));
+  gap: 6px;
+}
+
+.zchat-automation-reaction {
+  display: grid;
+  aspect-ratio: 1;
+  place-items: center;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--field);
+  color: var(--ink);
+  font-size: 18px;
+  transition: border-color 160ms ease, background 160ms ease, transform 120ms ease;
+}
+
+.zchat-automation-reaction:hover,
+.zchat-automation-reaction.selected {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+  transform: translateY(-1px);
+}
+
+.zchat-automation-reaction-count {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 82px;
+  align-items: center;
+  gap: 9px;
+  margin-top: 9px;
+  border: 1px solid var(--line);
+  border-radius: 11px;
+  padding: 8px;
+  background: var(--muted-panel);
+}
+
+.zchat-automation-reaction-count strong,
+.zchat-automation-reaction-count small {
+  display: block;
+}
+
+.zchat-automation-reaction-count strong {
+  font-size: 9px;
+}
+
+.zchat-automation-reaction-count small {
+  margin-top: 3px;
+  color: var(--muted);
+  font-size: 7px;
+  line-height: 1.35;
+}
+
+.zchat-automation-reaction-count select {
+  width: 100%;
+  border: 1px solid var(--line-strong);
+  border-radius: 9px;
+  padding: 8px;
+  outline: 0;
+  background: var(--field);
+  color: var(--ink);
+  font-size: 8px;
+}
+
+.zchat-automation-platform-note {
+  display: block;
+  margin-top: 7px;
+  color: #f4b84c;
+  font-size: 7px;
+  line-height: 1.4;
 }
 
 .zchat-automation-cooldown {
