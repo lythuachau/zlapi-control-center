@@ -510,6 +510,17 @@ def test_chat_projects_listener_events_and_queues_safe_send(client: TestClient):
     assert page.status_code == 200
     assert "ZCHAT DESK" in page.text
     assert "Chat account" in page.text
+    assert 'class="zchat-themes"' not in page.text
+    assert 'data-chat-nav="tasks"' not in page.text
+    assert 'id="chat-tasks-panel"' not in page.text
+    assert 'data-chat-nav="theme"' in page.text
+    assert 'id="chat-theme-panel"' in page.text
+    assert "Midnight" in page.text
+    assert "Daylight" in page.text
+    assert "Signal Desk" in page.text
+    assert 'data-chat-nav="automation"' in page.text
+    assert 'id="chat-automation-panel"' in page.text
+    assert "Tự động hóa" in page.text
 
     conversations = client.get(
         "/api/v1/chat/conversations",

@@ -1,7 +1,7 @@
 {% extends "base.html" %}
 
 {% block head %}
-  <link rel="stylesheet" href="{{ url_for('static', path='/css/chat.css') }}?v=20260730-friends-1">
+  <link rel="stylesheet" href="{{ url_for('static', path='/css/chat.css') }}?v=20260730-themes-1">
 {% endblock %}
 
 {% block content %}
@@ -24,18 +24,6 @@
         <small>Hội thoại Zalo realtime</small>
       </span>
     </a>
-
-    <div class="zchat-themes" aria-label="Chọn theme giao diện">
-      <button type="button" data-chat-theme="midnight" aria-pressed="true">
-        <i></i><span>Midnight</span>
-      </button>
-      <button type="button" data-chat-theme="daylight" aria-pressed="false">
-        <i></i><span>Daylight</span>
-      </button>
-      <button type="button" data-chat-theme="signal" aria-pressed="false">
-        <i></i><span>Signal Desk</span>
-      </button>
-    </div>
 
     <div class="zchat-account-picker">
       <span class="zchat-listener-state" id="chat-listener-state">
@@ -75,8 +63,11 @@
         <button type="button" data-chat-nav="contacts" aria-pressed="false">
           <span>◎</span><small>Danh bạ</small>
         </button>
-        <button type="button" data-chat-nav="tasks" aria-pressed="false">
-          <span>⌁</span><small>Tác vụ</small>
+        <button type="button" data-chat-nav="theme" aria-pressed="false">
+          <span>◐</span><small>Giao diện</small>
+        </button>
+        <button type="button" data-chat-nav="automation" aria-pressed="false">
+          <span>⌁</span><small>Tự động hóa</small>
         </button>
       </nav>
       <span class="zchat-rail-spacer"></span>
@@ -143,33 +134,52 @@
         </div>
       </div>
 
-      <div class="zchat-tasks-panel" id="chat-tasks-panel" hidden>
-        <div class="zchat-tasks-toolbar">
-          <label>
-            <span>Trạng thái</span>
-            <select id="chat-tasks-filter" aria-label="Lọc trạng thái tác vụ">
-              <option value="all">Tất cả</option>
-              <option value="queued">Đang chờ</option>
-              <option value="running">Đang chạy</option>
-              <option value="failed">Thất bại</option>
-              <option value="succeeded">Hoàn tất</option>
-              <option value="cancelled">Đã hủy</option>
-            </select>
-          </label>
-          <button
-            type="button"
-            id="chat-tasks-refresh"
-            aria-label="Làm mới tác vụ"
-            title="Làm mới tác vụ"
-          >↻</button>
+      <div class="zchat-theme-panel" id="chat-theme-panel" hidden>
+        <p class="zchat-panel-intro">
+          Chọn phong cách phù hợp với cách bạn làm việc. Lựa chọn được ghi nhớ trên trình duyệt này.
+        </p>
+        <div class="zchat-theme-grid" role="radiogroup" aria-label="Chọn theme giao diện">
+          <button class="zchat-theme-card preview-midnight" type="button" data-chat-theme="midnight" aria-pressed="true" role="radio" aria-checked="true">
+            <span class="zchat-theme-preview" aria-hidden="true">
+              <i></i><i></i><i></i><b></b>
+            </span>
+            <span class="zchat-theme-copy">
+              <strong>Midnight</strong>
+              <small>Tối sâu, xanh mint dịu mắt</small>
+            </span>
+            <span class="zchat-theme-check" aria-hidden="true">✓</span>
+          </button>
+          <button class="zchat-theme-card preview-daylight" type="button" data-chat-theme="daylight" aria-pressed="false" role="radio" aria-checked="false">
+            <span class="zchat-theme-preview" aria-hidden="true">
+              <i></i><i></i><i></i><b></b>
+            </span>
+            <span class="zchat-theme-copy">
+              <strong>Daylight</strong>
+              <small>Sáng rõ, tương phản dễ đọc</small>
+            </span>
+            <span class="zchat-theme-check" aria-hidden="true">✓</span>
+          </button>
+          <button class="zchat-theme-card preview-signal" type="button" data-chat-theme="signal" aria-pressed="false" role="radio" aria-checked="false">
+            <span class="zchat-theme-preview" aria-hidden="true">
+              <i></i><i></i><i></i><b></b>
+            </span>
+            <span class="zchat-theme-copy">
+              <strong>Signal Desk</strong>
+              <small>Tương phản mạnh, phong cách điều hành</small>
+            </span>
+            <span class="zchat-theme-check" aria-hidden="true">✓</span>
+          </button>
         </div>
-        <div class="zchat-tasks-status" id="chat-tasks-status">
-          Chọn tài khoản để xem tác vụ.
+      </div>
+
+      <div class="zchat-automation-panel" id="chat-automation-panel" hidden>
+        <div class="zchat-automation-empty">
+          <span class="zchat-automation-icon" aria-hidden="true">⌁</span>
+          <small>KHÔNG GIAN ĐANG CHỜ</small>
+          <strong>Tự động hóa</strong>
+          <p>Chức năng sẽ được xây dựng theo chỉ thị tiếp theo của bạn.</p>
+          <span class="zchat-automation-state"><i></i> Chưa có quy trình nào được kích hoạt</span>
         </div>
-        <div class="zchat-tasks-list" id="chat-tasks-list">
-          <div class="zchat-list-empty">Chưa tải danh sách tác vụ.</div>
-        </div>
-        <a class="zchat-tasks-history" href="/jobs">Mở toàn bộ lịch sử hệ thống ↗</a>
       </div>
 
       <div class="zchat-connection-card">
@@ -632,22 +642,6 @@
     </form>
   </dialog>
 
-  <dialog class="zchat-dialog zchat-details-dialog" id="chat-task-details-dialog">
-    <form method="dialog" class="zchat-dialog-shell compact">
-      <header>
-        <span>
-          <small>CHI TIẾT TÁC VỤ</small>
-          <strong id="chat-task-details-title">Tác vụ ZChat</strong>
-        </span>
-        <button value="cancel" aria-label="Đóng">×</button>
-      </header>
-      <dl class="zchat-message-details" id="chat-task-details"></dl>
-      <footer>
-        <button class="primary" value="cancel">Đóng</button>
-      </footer>
-    </form>
-  </dialog>
-
   <dialog class="zchat-dialog zchat-rich-media-dialog" id="chat-rich-media-dialog">
     <form method="dialog" class="zchat-dialog-shell wide">
       <header>
@@ -913,5 +907,5 @@
 {% endblock %}
 
 {% block scripts %}
-  <script defer src="{{ url_for('static', path='/js/chat.js') }}?v=20260730-friends-1"></script>
+  <script defer src="{{ url_for('static', path='/js/chat.js') }}?v=20260730-themes-1"></script>
 {% endblock %}

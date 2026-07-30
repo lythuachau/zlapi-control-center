@@ -112,7 +112,8 @@
   const contactsSearch = $("#chat-contacts-search");
   const contactsStatus = $("#chat-contacts-status");
   const contactsRefresh = $("#chat-contacts-refresh");
-  const tasksPanel = $("#chat-tasks-panel");
+  const themePanel = $("#chat-theme-panel");
+  const automationPanel = $("#chat-automation-panel");
   const tasksList = $("#chat-tasks-list");
   const tasksFilter = $("#chat-tasks-filter");
   const tasksStatus = $("#chat-tasks-status");
@@ -1716,7 +1717,7 @@
   }
 
   function setNavigation(nav) {
-    state.nav = ["contacts", "tasks"].includes(nav) ? nav : "messages";
+    state.nav = ["contacts", "theme", "automation"].includes(nav) ? nav : "messages";
     $$("[data-chat-nav]").forEach((item) => {
       const active = item.dataset.chatNav === state.nav;
       item.classList.toggle("active", active);
@@ -1724,28 +1725,28 @@
     });
     const messagesActive = state.nav === "messages";
     const contactsActive = state.nav === "contacts";
-    const tasksActive = state.nav === "tasks";
+    const themeActive = state.nav === "theme";
+    const automationActive = state.nav === "automation";
     if (conversationList) conversationList.hidden = !messagesActive;
     if (conversationSearch) conversationSearch.hidden = !messagesActive;
     if (conversationFilters) conversationFilters.hidden = !messagesActive;
     if (conversationRefresh) conversationRefresh.hidden = !messagesActive;
     if (contactsPanel) contactsPanel.hidden = !contactsActive;
-    if (tasksPanel) tasksPanel.hidden = !tasksActive;
+    if (themePanel) themePanel.hidden = !themeActive;
+    if (automationPanel) automationPanel.hidden = !automationActive;
     if (inboxTitle) {
       inboxTitle.textContent = contactsActive
         ? "Danh bạ"
-        : tasksActive
-          ? "Tác vụ"
+        : themeActive
+          ? "Giao diện"
+          : automationActive
+            ? "Tự động hóa"
           : "Hội thoại";
     }
-    if (!tasksActive) window.clearTimeout(state.tasksPollTimer);
+    window.clearTimeout(state.tasksPollTimer);
     if (contactsActive) {
       renderContacts();
       void loadContacts();
-    }
-    if (tasksActive) {
-      renderTasks();
-      void loadTasks();
     }
   }
 
@@ -5232,7 +5233,7 @@
         const pending = state.friendActionJobs.get(envelope.payload.job_id);
         if (pending) {
           state.friendActionJobs.delete(envelope.payload.job_id);
-          toast("Zalo từ chối thay đổi quan hệ. Mở Tác vụ để xem chi tiết.", "error");
+          toast("Zalo từ chối thay đổi quan hệ. Mở Control Center để xem chi tiết.", "error");
           if (
             state.accountId === pending.accountId &&
             state.activeThread?.thread_id === pending.userId
@@ -5285,8 +5286,8 @@
           state.groupManagementJobs.delete(envelope.payload.job_id);
           toast(
             action === "changeGroupName"
-              ? "Không thể đổi tên nhóm. Mở Tác vụ để xem chi tiết."
-              : "Không thể mời thành viên. Mở Tác vụ để xem chi tiết.",
+              ? "Không thể đổi tên nhóm. Mở Control Center để xem chi tiết."
+              : "Không thể mời thành viên. Mở Control Center để xem chi tiết.",
             "error",
           );
         }
@@ -5308,6 +5309,9 @@
       const active = button.dataset.chatTheme === theme;
       button.classList.toggle("active", active);
       button.setAttribute("aria-pressed", String(active));
+      if (button.getAttribute("role") === "radio") {
+        button.setAttribute("aria-checked", String(active));
+      }
     });
   }
 
