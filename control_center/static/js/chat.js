@@ -78,6 +78,16 @@
     attachments: [],
     attachmentSequence: 0,
     uploading: false,
+    richTab: "sticker",
+    richDraft: null,
+    richUploading: false,
+    stickerCatalog: [],
+    stickerRecentKeys: new Set(),
+    stickerFavoriteKeys: new Set(),
+    stickerFilter: "all",
+    stickerSearch: "",
+    stickerRequestId: 0,
+    richContactSearch: "",
     lastMessageScrollTop: 0,
   };
 
@@ -162,6 +172,22 @@
   const attachImages = $("#chat-attach-images");
   const fileInput = $("#chat-file-input");
   const imageInput = $("#chat-image-input");
+  const richMediaOpen = $("#chat-rich-media-open");
+  const richMediaDialog = $("#chat-rich-media-dialog");
+  const richSend = $("#chat-rich-send");
+  const richStatus = $("#chat-rich-status");
+  const stickerGrid = $("#chat-sticker-grid");
+  const stickerSearch = $("#chat-sticker-search");
+  const stickerStatus = $("#chat-sticker-status");
+  const richContactSearch = $("#chat-rich-contact-search");
+  const richContactList = $("#chat-rich-contact-list");
+  const gifInput = $("#chat-gif-input");
+  const audioInput = $("#chat-audio-input");
+  const richPreviewCard = $("#chat-rich-preview-card");
+  const richPreviewMedia = $("#chat-rich-preview-media");
+  const richPreviewTitle = $("#chat-rich-preview-title");
+  const richPreviewCopy = $("#chat-rich-preview-copy");
+  const richPreviewMeta = $("#chat-rich-preview-meta");
   const maxUploadBytes = Math.max(
     Number(app.dataset.maxUploadMb) || 25,
     1,
@@ -359,6 +385,9 @@
     );
     attachFiles.disabled = !ready || state.uploading;
     attachImages.disabled = !ready || state.uploading;
+    if (richMediaOpen) {
+      richMediaOpen.disabled = !ready || state.uploading || state.richUploading;
+    }
     if (!state.canSend) {
       draft.placeholder = "Tài khoản Viewer chỉ có quyền xem.";
     } else if (!state.activeThread) {
@@ -562,6 +591,675 @@
       renderAttachments();
       updateComposer();
     }
+  }
+
+  function setRichStatus(message, tone = "") {
+    if (!richStatus) return;
+    richStatus.textContent = message;
+    richStatus.dataset.tone = tone;
+  }
+
+  function clearRichDraft({ render = true } = {}) {
+    const draftItem = state.richDraft;
+    draftItem?.xhr?.abort();
+    if (draftItem?.objectUrl) URL.revokeObjectURL(draftItem.objectUrl);
+    state.richDraft = null;
+    if (render) renderRichPreview();
+  }
+
+  function setRichDraft(item) {
+    const previous = state.richDraft;
+    if (previous?.objectUrl && previous.objectUrl !== item?.objectUrl) {
+      previous.xhr?.abort();
+      URL.revokeObjectURL(previous.objectUrl);
+    }
+    state.richDraft = item;
+    renderRichPreview();
+    if (item) {
+      setRichStatus(`${item.label || "Nội dung"} đã sẵn sàng để gửi.`);
+    }
+  }
+
+  function renderRichPreview() {
+    if (!richPreviewCard || !richPreviewMedia) return;
+    const item = state.richDraft;
+    richPreviewMedia.replaceChildren();
+    richPreviewCard.classList.toggle("empty", !item);
+    if (richSend) richSend.disabled = !item || state.richUploading;
+    if (!item) {
+      richPreviewMedia.textContent = "✦";
+      richPreviewTitle.textContent = "Chưa chọn nội dung";
+      richPreviewCopy.textContent = (
+        "Chọn một sticker, GIF, liên kết, danh thiếp hoặc audio để kiểm tra trước khi gửi."
+      );
+      richPreviewMeta.textContent = "Không có dữ liệu nào được gửi ở bước này.";
+      return;
+    }
+
+    if (item.kind === "sticker") {
+      const image = document.createElement("img");
+      image.className = "sticker";
+      image.src = item.thumbnail_url;
+      image.alt = `Sticker ${item.sticker_id}`;
+      image.addEventListener("error", () => {
+        richPreviewMedia.textContent = "STK";
+      }, { once: true });
+      richPreviewMedia.append(image);
+      richPreviewTitle.textContent = "Sticker Zalo";
+      richPreviewCopy.textContent = `Bộ ${item.category_id} · Sticker ${item.sticker_id}`;
+      richPreviewMeta.textContent = "Sẵn sàng · Gửi bằng sendSticker";
+    } else if (item.kind === "gif") {
+      const image = document.createElement("img");
+      image.src = item.objectUrl;
+      image.alt = item.file.name;
+      richPreviewMedia.append(image);
+      richPreviewTitle.textContent = item.file.name;
+      richPreviewCopy.textContent = "GIF sẽ được tải lên an toàn rồi gửi qua Zalo.";
+      richPreviewMeta.textContent = `${formatBytes(item.file.size)} · ${item.width || "?"}×${item.height || "?"}`;
+    } else if (item.kind === "link") {
+      if (item.thumbnail_url) {
+        const image = document.createElement("img");
+        image.src = item.thumbnail_url;
+        image.alt = "";
+        image.addEventListener("error", () => {
+          richPreviewMedia.textContent = "↗";
+        }, { once: true });
+        richPreviewMedia.append(image);
+      } else {
+        richPreviewMedia.textContent = "↗";
+      }
+      richPreviewTitle.textContent = item.title;
+      richPreviewCopy.textContent = item.description || "Liên kết không có mô tả.";
+      richPreviewMeta.textContent = item.url;
+    } else if (item.kind === "contact") {
+      const contact = document.createElement("div");
+      contact.className = "contact";
+      const avatar = document.createElement("span");
+      paintAvatar(avatar, {
+        thread_id: item.contact_user_id,
+        name: item.contact_name,
+        initials: item.initials,
+        avatar_url: item.avatar_url,
+      }, { large: true });
+      const name = document.createElement("strong");
+      name.textContent = item.contact_name;
+      contact.append(avatar, name);
+      richPreviewMedia.append(contact);
+      richPreviewTitle.textContent = "Danh thiếp Zalo";
+      richPreviewCopy.textContent = item.contact_phone || `ID ${item.contact_user_id}`;
+      richPreviewMeta.textContent = "Không ổn định · Gửi bằng sendBusinessCard";
+    } else if (item.kind === "audio") {
+      const audio = document.createElement("audio");
+      audio.src = item.objectUrl;
+      audio.controls = true;
+      audio.preload = "metadata";
+      richPreviewMedia.append(audio);
+      richPreviewTitle.textContent = item.file.name;
+      richPreviewCopy.textContent = "Nghe thử trước khi gửi dưới dạng tin nhắn thoại.";
+      const duration = item.durationMs
+        ? `${Math.round(item.durationMs / 1000)} giây`
+        : "Chưa đọc thời lượng";
+      richPreviewMeta.textContent = `${formatBytes(item.file.size)} · ${duration}`;
+    }
+  }
+
+  function switchRichTab(tab) {
+    if (!["sticker", "gif", "link", "contact", "audio"].includes(tab)) return;
+    if (state.richDraft && state.richDraft.kind !== tab) {
+      clearRichDraft();
+    }
+    state.richTab = tab;
+    $$("[data-rich-tab]").forEach((button) => {
+      const active = button.dataset.richTab === tab;
+      button.classList.toggle("active", active);
+      button.setAttribute("aria-selected", String(active));
+    });
+    $$("[data-rich-panel]").forEach((panel) => {
+      panel.hidden = panel.dataset.richPanel !== tab;
+    });
+    setRichStatus(
+      {
+        sticker: "Chọn một sticker để xem trước.",
+        gif: "Chọn tệp GIF từ máy.",
+        link: "Nhập URL để tạo thẻ liên kết.",
+        contact: "Chọn một người trong danh bạ.",
+        audio: "Chọn tệp âm thanh để nghe thử.",
+      }[tab],
+    );
+    if (tab === "contact") renderRichContacts();
+  }
+
+  function stickerKey(item) {
+    return `${item.category_id}:${item.sticker_id}`;
+  }
+
+  function normalizedSticker(item) {
+    if (!item) return null;
+    const stickerId = String(item.sticker_id || "").trim();
+    const categoryId = String(item.category_id || "").trim();
+    if (!/^[1-9]\d{0,39}$/.test(stickerId) || !/^[1-9]\d{0,39}$/.test(categoryId)) {
+      return null;
+    }
+    return {
+      key: `${categoryId}:${stickerId}`,
+      sticker_id: stickerId,
+      category_id: categoryId,
+      sticker_type: Math.min(Math.max(Number(item.sticker_type) || 1, 0), 100),
+      thumbnail_url: text(item.thumbnail_url) || (
+        "https://zalo-api.zadn.vn/api/emoticon/sticker/" +
+        `webpc?eid=${encodeURIComponent(stickerId)}&size=130`
+      ),
+      width: Number(item.width) || 130,
+      height: Number(item.height) || 130,
+      last_used_at: item.last_used_at || null,
+      favorite: Boolean(item.favorite),
+    };
+  }
+
+  function selectSticker(item) {
+    const sticker = normalizedSticker(item);
+    if (!sticker) {
+      toast("Sticker ID hoặc Category ID không hợp lệ.", "error");
+      return;
+    }
+    setRichDraft({
+      ...sticker,
+      kind: "sticker",
+      label: `Sticker ${sticker.sticker_id}`,
+    });
+    renderStickerCatalog();
+  }
+
+  function visibleStickers() {
+    const term = state.stickerSearch.toLocaleLowerCase("vi");
+    return state.stickerCatalog.filter((item) => {
+      const key = stickerKey(item);
+      if (state.stickerFilter === "recent" && !state.stickerRecentKeys.has(key)) {
+        return false;
+      }
+      if (state.stickerFilter === "favorite" && !state.stickerFavoriteKeys.has(key)) {
+        return false;
+      }
+      return !term || `${key} ${item.sticker_id} ${item.category_id}`.includes(term);
+    });
+  }
+
+  function renderStickerCatalog() {
+    if (!stickerGrid) return;
+    const items = visibleStickers();
+    if (!items.length) {
+      const empty = document.createElement("div");
+      empty.className = "zchat-dialog-empty";
+      empty.textContent = state.stickerCatalog.length
+        ? "Không có sticker phù hợp với bộ lọc."
+        : "Chưa tìm thấy sticker trong lịch sử. Bạn có thể thêm bằng mã bên dưới.";
+      stickerGrid.replaceChildren(empty);
+      return;
+    }
+    const nodes = items.map((item) => {
+      const card = document.createElement("div");
+      const key = stickerKey(item);
+      card.className = `zchat-sticker-item${
+        state.richDraft?.kind === "sticker" && stickerKey(state.richDraft) === key
+          ? " selected"
+          : ""
+      }`;
+      card.role = "button";
+      card.tabIndex = 0;
+      card.setAttribute("aria-label", `Xem trước sticker ${item.sticker_id}`);
+      const image = document.createElement("img");
+      image.src = item.thumbnail_url;
+      image.alt = "";
+      image.loading = "lazy";
+      const code = document.createElement("small");
+      code.textContent = `${item.category_id}:${item.sticker_id}`;
+      const favorite = document.createElement("button");
+      favorite.type = "button";
+      favorite.className = `zchat-sticker-favorite${
+        state.stickerFavoriteKeys.has(key) ? " active" : ""
+      }`;
+      favorite.textContent = state.stickerFavoriteKeys.has(key) ? "★" : "☆";
+      favorite.title = state.stickerFavoriteKeys.has(key)
+        ? "Bỏ khỏi yêu thích"
+        : "Thêm vào yêu thích";
+      favorite.addEventListener("click", (event) => {
+        event.stopPropagation();
+        void toggleStickerFavorite(item);
+      });
+      card.append(image, code, favorite);
+      card.addEventListener("click", () => selectSticker(item));
+      card.addEventListener("keydown", (event) => {
+        if (event.key !== "Enter" && event.key !== " ") return;
+        event.preventDefault();
+        selectSticker(item);
+      });
+      return card;
+    });
+    stickerGrid.replaceChildren(...nodes);
+  }
+
+  function applyStickerCatalog(result) {
+    const items = Array.isArray(result?.items) ? result.items : [];
+    state.stickerCatalog = items
+      .map(normalizedSticker)
+      .filter(Boolean);
+    state.stickerRecentKeys = new Set(
+      (Array.isArray(result?.recent) ? result.recent : [])
+        .map(normalizedSticker)
+        .filter(Boolean)
+        .map(stickerKey),
+    );
+    state.stickerFavoriteKeys = new Set(
+      (Array.isArray(result?.favorites) ? result.favorites : [])
+        .map(normalizedSticker)
+        .filter(Boolean)
+        .map(stickerKey),
+    );
+    for (const item of state.stickerCatalog) {
+      item.favorite = state.stickerFavoriteKeys.has(stickerKey(item));
+    }
+    renderStickerCatalog();
+    if (stickerStatus) {
+      stickerStatus.textContent = state.stickerCatalog.length
+        ? `${state.stickerCatalog.length} sticker · ${state.stickerFavoriteKeys.size} yêu thích`
+        : "Chưa có sticker trong lịch sử Listener; hãy thêm bằng mã.";
+    }
+  }
+
+  async function loadStickerCatalog() {
+    if (!state.accountId) return;
+    const accountId = state.accountId;
+    const requestId = ++state.stickerRequestId;
+    if (stickerStatus) stickerStatus.textContent = "Đang đọc sticker từ lịch sử…";
+    try {
+      const result = await api(
+        `/api/v1/chat/stickers?account_id=${encodeURIComponent(accountId)}`,
+      );
+      if (requestId !== state.stickerRequestId || state.accountId !== accountId) return;
+      applyStickerCatalog(result);
+    } catch (error) {
+      if (requestId === state.stickerRequestId) {
+        if (stickerStatus) stickerStatus.textContent = error.message;
+        toast(`Không thể tải thư viện sticker: ${error.message}`, "error");
+      }
+    }
+  }
+
+  async function saveStickerFavorites() {
+    const favorites = state.stickerCatalog
+      .filter((item) => state.stickerFavoriteKeys.has(stickerKey(item)))
+      .slice(0, 48)
+      .map((item) => ({
+        sticker_id: item.sticker_id,
+        category_id: item.category_id,
+        sticker_type: item.sticker_type,
+        thumbnail_url: item.thumbnail_url,
+        width: item.width,
+        height: item.height,
+      }));
+    return api("/api/v1/chat/stickers/preferences", {
+      method: "PUT",
+      body: JSON.stringify({
+        account_id: state.accountId,
+        favorites,
+      }),
+    });
+  }
+
+  async function toggleStickerFavorite(item) {
+    const key = stickerKey(item);
+    const wasFavorite = state.stickerFavoriteKeys.has(key);
+    if (wasFavorite) state.stickerFavoriteKeys.delete(key);
+    else state.stickerFavoriteKeys.add(key);
+    renderStickerCatalog();
+    try {
+      const result = await saveStickerFavorites();
+      applyStickerCatalog(result);
+      toast(wasFavorite ? "Đã bỏ sticker khỏi yêu thích." : "Đã thêm sticker vào yêu thích.");
+    } catch (error) {
+      if (wasFavorite) state.stickerFavoriteKeys.add(key);
+      else state.stickerFavoriteKeys.delete(key);
+      renderStickerCatalog();
+      toast(error.message, "error");
+    }
+  }
+
+  function useManualSticker() {
+    const sticker = normalizedSticker({
+      sticker_id: $("#chat-sticker-id")?.value,
+      category_id: $("#chat-sticker-category")?.value,
+      sticker_type: $("#chat-sticker-type")?.value,
+    });
+    if (!sticker) {
+      toast("Hãy nhập Sticker ID và Category ID là số dương.", "error");
+      return;
+    }
+    if (!state.stickerCatalog.some((item) => stickerKey(item) === sticker.key)) {
+      state.stickerCatalog.unshift(sticker);
+    }
+    selectSticker(sticker);
+  }
+
+  function renderRichContacts() {
+    if (!richContactList) return;
+    const term = state.richContactSearch.toLocaleLowerCase("vi");
+    const items = state.contacts.filter((item) => (
+      !term
+      || `${item.name} ${item.user_id} ${item.phone || ""}`
+        .toLocaleLowerCase("vi")
+        .includes(term)
+    ));
+    if (!items.length) {
+      const empty = document.createElement("div");
+      empty.className = "zchat-dialog-empty";
+      empty.textContent = state.contacts.length
+        ? "Không tìm thấy người phù hợp."
+        : "Chưa có danh bạ. Hãy đồng bộ ở tab Danh bạ trước.";
+      richContactList.replaceChildren(empty);
+      return;
+    }
+    richContactList.replaceChildren(...items.map((item) => {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = `zchat-rich-contact-item${
+        state.richDraft?.kind === "contact"
+        && state.richDraft.contact_user_id === item.user_id
+          ? " selected"
+          : ""
+      }`;
+      const avatar = document.createElement("span");
+      paintAvatar(avatar, {
+        ...item,
+        thread_id: item.user_id,
+        thread_type: "user",
+      });
+      const copy = document.createElement("span");
+      const name = document.createElement("strong");
+      name.textContent = item.name;
+      const detail = document.createElement("small");
+      detail.textContent = item.phone || `ID ${item.user_id}`;
+      copy.append(name, detail);
+      const presence = document.createElement("i");
+      presence.className = item.online ? "online" : "";
+      button.append(avatar, copy, presence);
+      button.addEventListener("click", () => {
+        setRichDraft({
+          kind: "contact",
+          label: item.name,
+          contact_user_id: item.user_id,
+          contact_name: item.name,
+          contact_phone: item.phone || null,
+          contact_qr_url: "",
+          avatar_url: item.avatar_url || null,
+          initials: item.initials,
+        });
+        renderRichContacts();
+      });
+      return button;
+    }));
+  }
+
+  function validHttpUrl(value) {
+    try {
+      const parsed = new URL(value);
+      return ["http:", "https:"].includes(parsed.protocol) ? parsed : null;
+    } catch {
+      return null;
+    }
+  }
+
+  function updateLinkDraft() {
+    const url = text($("#chat-link-url")?.value);
+    if (!url) {
+      if (state.richDraft?.kind === "link") clearRichDraft();
+      setRichStatus("Nhập URL để tạo thẻ liên kết.");
+      return;
+    }
+    const parsed = validHttpUrl(url);
+    const thumbnail = text($("#chat-link-thumbnail")?.value);
+    if (!parsed || (thumbnail && !validHttpUrl(thumbnail))) {
+      if (state.richDraft?.kind === "link") clearRichDraft();
+      setRichStatus("URL hoặc ảnh đại diện chưa hợp lệ.", "error");
+      return;
+    }
+    setRichDraft({
+      kind: "link",
+      label: "Liên kết",
+      url,
+      title: text($("#chat-link-title")?.value) || parsed.hostname,
+      description: text($("#chat-link-description")?.value),
+      thumbnail_url: thumbnail || null,
+    });
+  }
+
+  function selectRichFile(kind, file) {
+    if (!file) return;
+    try {
+      validateAttachment(file);
+      if (
+        kind === "gif"
+        && String(file.type || "").toLowerCase() !== "image/gif"
+        && !file.name.toLowerCase().endsWith(".gif")
+      ) {
+        throw new Error("Hãy chọn đúng tệp .gif.");
+      }
+      if (kind === "audio" && attachmentKind(file) !== "audio") {
+        throw new Error("Hãy chọn một tệp âm thanh được hỗ trợ.");
+      }
+    } catch (error) {
+      toast(error.message, "error");
+      return;
+    }
+    const item = {
+      kind,
+      label: file.name,
+      file,
+      objectUrl: URL.createObjectURL(file),
+      width: null,
+      height: null,
+      durationMs: null,
+      uploaded: null,
+      xhr: null,
+    };
+    setRichDraft(item);
+    const media = kind === "gif" ? new Image() : document.createElement("audio");
+    const readyEvent = kind === "gif" ? "load" : "loadedmetadata";
+    media.addEventListener(readyEvent, () => {
+      if (state.richDraft !== item) return;
+      item.width = Number(media.naturalWidth) || null;
+      item.height = Number(media.naturalHeight) || null;
+      item.durationMs = Number.isFinite(media.duration)
+        ? Math.round(media.duration * 1000)
+        : null;
+      renderRichPreview();
+    }, { once: true });
+    media.src = item.objectUrl;
+  }
+
+  function uploadRichFile(item) {
+    if (item.uploaded) return Promise.resolve(item.uploaded);
+    return new Promise((resolve, reject) => {
+      const xhr = new XMLHttpRequest();
+      const csrf = document.querySelector('meta[name="csrf-token"]')?.content || "";
+      const form = new FormData();
+      form.append("file", item.file, item.file.name);
+      item.xhr = xhr;
+      xhr.open("POST", "/api/v1/uploads");
+      xhr.responseType = "json";
+      xhr.setRequestHeader("Accept", "application/json");
+      if (csrf) xhr.setRequestHeader("X-CSRF-Token", csrf);
+      xhr.upload.addEventListener("progress", (event) => {
+        if (!event.lengthComputable) return;
+        const progress = Math.min(99, Math.round((event.loaded / event.total) * 100));
+        setRichStatus(`Đang tải ${item.file.name} · ${progress}%`);
+      });
+      xhr.addEventListener("load", () => {
+        item.xhr = null;
+        const payload = xhr.response || {};
+        if (xhr.status < 200 || xhr.status >= 300) {
+          const detail = payload.detail;
+          const message = typeof detail === "string"
+            ? detail
+            : Array.isArray(detail)
+              ? detail.map((part) => part.msg || String(part)).join("; ")
+              : `Tải lên thất bại (HTTP ${xhr.status})`;
+          reject(new Error(message));
+          return;
+        }
+        if (payload.kind !== item.kind) {
+          reject(new Error(`Server nhận diện tệp là ${payload.kind}, không phải ${item.kind}.`));
+          return;
+        }
+        item.uploaded = payload;
+        resolve(payload);
+      });
+      xhr.addEventListener("error", () => {
+        item.xhr = null;
+        reject(new Error(`Không thể tải ${item.file.name} lên server.`));
+      });
+      xhr.addEventListener("abort", () => {
+        item.xhr = null;
+        reject(new Error(`Đã hủy tải ${item.file.name}.`));
+      });
+      xhr.send(form);
+    });
+  }
+
+  async function sendRichContent() {
+    const item = state.richDraft;
+    if (
+      !item
+      || !state.activeThread
+      || !state.accountId
+      || !accountIsReady()
+      || state.richUploading
+    ) return;
+    if (state.replyTarget) {
+      toast("Nội dung nâng cao chưa hỗ trợ trả lời trích dẫn. Hãy hủy chế độ trả lời trước.", "error");
+      return;
+    }
+    const target = { ...state.activeThread };
+    state.richUploading = true;
+    richSend.disabled = true;
+    richSend.textContent = "Đang gửi…";
+    updateComposer();
+    try {
+      let result;
+      if (item.kind === "gif" || item.kind === "audio") {
+        const uploaded = await uploadRichFile(item);
+        setRichStatus("Đang xếp hàng gửi qua Zalo…");
+        if (item.kind === "gif") {
+          result = await api("/api/v1/chat/rich-media", {
+            method: "POST",
+            body: JSON.stringify({
+              account_id: state.accountId,
+              thread_id: target.thread_id,
+              thread_type: target.thread_type,
+              kind: "gif",
+              upload_token: uploaded.token,
+              thumbnail_url: uploaded.preview_url,
+              width: item.width,
+              height: item.height,
+            }),
+          });
+        } else {
+          result = await api("/api/v1/chat/media", {
+            method: "POST",
+            body: JSON.stringify({
+              account_id: state.accountId,
+              thread_id: target.thread_id,
+              thread_type: target.thread_type,
+              text: "",
+              items: [{
+                upload_token: uploaded.token,
+                kind: "audio",
+                name: uploaded.name || item.file.name,
+                content_type: uploaded.content_type || item.file.type || null,
+                size_bytes: uploaded.size_bytes || item.file.size,
+                duration_ms: item.durationMs,
+              }],
+            }),
+          });
+        }
+      } else {
+        const body = {
+          account_id: state.accountId,
+          thread_id: target.thread_id,
+          thread_type: target.thread_type,
+          kind: item.kind,
+        };
+        if (item.kind === "sticker") {
+          Object.assign(body, {
+            sticker_id: item.sticker_id,
+            category_id: item.category_id,
+            sticker_type: item.sticker_type,
+            thumbnail_url: item.thumbnail_url,
+            width: item.width,
+            height: item.height,
+          });
+        } else if (item.kind === "link") {
+          Object.assign(body, {
+            url: item.url,
+            title: item.title,
+            description: item.description || null,
+            thumbnail_url: item.thumbnail_url || null,
+          });
+        } else if (item.kind === "contact") {
+          Object.assign(body, {
+            contact_user_id: item.contact_user_id,
+            contact_name: item.contact_name,
+            contact_phone: item.contact_phone,
+            contact_qr_url: item.contact_qr_url || null,
+          });
+        }
+        result = await api("/api/v1/chat/rich-media", {
+          method: "POST",
+          body: JSON.stringify(body),
+        });
+      }
+      appendRealtimeMessage(result.message);
+      const sentKind = item.kind;
+      dialogClose(richMediaDialog);
+      clearRichDraft();
+      setRichStatus("Đã xếp hàng gửi qua Zalo.");
+      toast("Đã xếp hàng gửi nội dung.");
+      scheduleConversationReload();
+      if (sentKind === "sticker") {
+        window.setTimeout(() => void loadStickerCatalog(), 250);
+      }
+    } catch (error) {
+      setRichStatus(error.message, "error");
+      toast(error.message, "error");
+      updateAccountStatus();
+    } finally {
+      state.richUploading = false;
+      richSend.textContent = "Gửi nội dung";
+      renderRichPreview();
+      updateComposer();
+    }
+  }
+
+  function openRichMediaDialog() {
+    if (!state.activeThread || !state.canSend || !accountIsReady()) {
+      toast("Hãy chọn hội thoại có Listener online trước khi gửi nội dung.", "error");
+      return;
+    }
+    if (state.replyTarget) {
+      toast("Hãy hủy chế độ trả lời trước khi mở nội dung nâng cao.", "error");
+      return;
+    }
+    clearRichDraft();
+    state.stickerFilter = "all";
+    state.stickerSearch = "";
+    state.richContactSearch = "";
+    if (stickerSearch) stickerSearch.value = "";
+    if (richContactSearch) richContactSearch.value = "";
+    switchRichTab("sticker");
+    renderStickerCatalog();
+    renderRichContacts();
+    dialogOpen(richMediaDialog);
+    void loadStickerCatalog();
+    if (!state.contacts.length) void loadContacts();
   }
 
   function renderConversation(item) {
@@ -798,6 +1496,7 @@
       if (requestId !== state.contactsRequestId) return;
       state.contacts = Array.isArray(result.contacts) ? result.contacts : [];
       renderContacts();
+      renderRichContacts();
       const job = result.job;
       if (job?.status === "queued" || job?.status === "running") {
         contactsStatus.textContent = `Đang đồng bộ ${state.contacts.length} liên hệ…`;
@@ -822,6 +1521,7 @@
     sendMessage: "Gửi tin nhắn",
     replyMessage: "Trả lời tin nhắn",
     __chat_media__: "Gửi hình ảnh / tệp",
+    __chat_rich_media__: "Gửi sticker / nội dung nâng cao",
     __chat_reaction__: "Thả reaction",
     __chat_forward__: "Chia sẻ tin nhắn",
     undoMessage: "Thu hồi tin nhắn",
@@ -1189,6 +1889,30 @@
     container.append(card);
   }
 
+  function addContactCard(container, message) {
+    const media = message.media || {};
+    const card = document.createElement("span");
+    card.className = "zchat-contact-share-card";
+    const avatar = document.createElement("span");
+    paintAvatar(avatar, {
+      thread_id: media.contact_user_id || message.id,
+      name: media.contact_name || "Danh thiếp Zalo",
+      initials: initials(media.contact_name || "Zalo"),
+      avatar_url: media.avatar_url || media.thumbnail_url,
+    });
+    const copy = document.createElement("span");
+    const name = document.createElement("strong");
+    name.textContent = media.contact_name || "Danh thiếp Zalo";
+    const detail = document.createElement("small");
+    detail.textContent = media.contact_phone
+      || (media.contact_user_id ? `ID ${media.contact_user_id}` : "Liên hệ được chia sẻ");
+    copy.append(name, detail);
+    const badge = document.createElement("span");
+    badge.textContent = "ZALO";
+    card.append(avatar, copy, badge);
+    container.append(card);
+  }
+
   function addInfoCard(container, message, type) {
     const media = message.media || {};
     const isPoll = type === "poll";
@@ -1260,7 +1984,7 @@
       addMediaCaption(bubble, message);
       return;
     }
-    if (message.kind === "image") {
+    if (message.kind === "image" || message.kind === "gif") {
       bubble.classList.add("has-media");
       addMediaImage(bubble, message);
       return;
@@ -1296,6 +2020,11 @@
     if (message.kind === "sticker") {
       bubble.classList.add("has-sticker");
       addMediaImage(bubble, message, { sticker: true });
+      return;
+    }
+    if (message.kind === "contact") {
+      bubble.classList.add("has-media");
+      addContactCard(bubble, message);
       return;
     }
     if (message.kind === "poll" || message.kind === "link") {
@@ -2945,6 +3674,8 @@
       state.unreadViewportFrame = null;
     }
     clearAttachments();
+    dialogClose(richMediaDialog);
+    clearRichDraft();
     state.activeThread = null;
     state.lastMessageScrollTop = 0;
     state.messagePagination = {
@@ -3026,6 +3757,8 @@
     const previous = state.activeThread;
     const previousAccountId = state.accountId;
     clearAttachments();
+    dialogClose(richMediaDialog);
+    clearRichDraft();
     state.replyTarget = null;
     state.forwardTarget = null;
     state.reactionTarget = null;
@@ -3094,6 +3827,10 @@
     window.clearTimeout(state.tasksPollTimer);
     state.contacts = [];
     state.contactsSearch = "";
+    state.stickerCatalog = [];
+    state.stickerRecentKeys.clear();
+    state.stickerFavoriteKeys.clear();
+    state.stickerRequestId += 1;
     state.tasks = [];
     state.tasksRequestId += 1;
     if (contactsSearch) contactsSearch.value = "";
@@ -3810,7 +4547,7 @@
       const envelope = JSON.parse(event.data);
       if (envelope.account_id !== state.accountId) return;
       const action = envelope.payload?.action;
-      if (["sendMessage", "replyMessage", "__chat_media__"].includes(action)) {
+      if (["sendMessage", "replyMessage", "__chat_media__", "__chat_rich_media__"].includes(action)) {
         updateJobStatus(envelope.payload.job_id, "succeeded");
         scheduleConversationReload();
       }
@@ -3895,7 +4632,7 @@
       const envelope = JSON.parse(event.data);
       if (envelope.account_id !== state.accountId) return;
       const action = envelope.payload?.action;
-      if (["sendMessage", "replyMessage", "__chat_media__"].includes(action)) {
+      if (["sendMessage", "replyMessage", "__chat_media__", "__chat_rich_media__"].includes(action)) {
         updateJobStatus(envelope.payload.job_id, "failed");
         toast("Một tin nhắn hoặc media gửi thất bại. Mở Jobs để xem chi tiết.", "error");
       }
@@ -4186,6 +4923,52 @@
     }
   });
   window.addEventListener("pagehide", persistActiveConversationRead);
+  richMediaOpen?.addEventListener("click", openRichMediaDialog);
+  $$("[data-rich-tab]").forEach((button) => {
+    button.addEventListener("click", () => switchRichTab(button.dataset.richTab));
+  });
+  $$("[data-sticker-filter]").forEach((button) => {
+    button.addEventListener("click", () => {
+      state.stickerFilter = button.dataset.stickerFilter;
+      $$("[data-sticker-filter]").forEach((item) => {
+        item.classList.toggle("active", item === button);
+      });
+      renderStickerCatalog();
+    });
+  });
+  stickerSearch?.addEventListener("input", (event) => {
+    state.stickerSearch = event.target.value;
+    renderStickerCatalog();
+  });
+  $("#chat-sticker-use-manual")?.addEventListener("click", useManualSticker);
+  $("#chat-gif-select button")?.addEventListener("click", () => gifInput?.click());
+  $("#chat-audio-select button")?.addEventListener("click", () => audioInput?.click());
+  gifInput?.addEventListener("change", () => {
+    selectRichFile("gif", gifInput.files?.[0]);
+    gifInput.value = "";
+  });
+  audioInput?.addEventListener("change", () => {
+    selectRichFile("audio", audioInput.files?.[0]);
+    audioInput.value = "";
+  });
+  for (const selector of [
+    "#chat-link-url",
+    "#chat-link-title",
+    "#chat-link-description",
+    "#chat-link-thumbnail",
+  ]) {
+    $(selector)?.addEventListener("input", updateLinkDraft);
+  }
+  richContactSearch?.addEventListener("input", (event) => {
+    state.richContactSearch = event.target.value;
+    renderRichContacts();
+  });
+  richSend?.addEventListener("click", () => void sendRichContent());
+  richMediaDialog?.addEventListener("close", () => {
+    if (state.richUploading) state.richDraft?.xhr?.abort();
+    clearRichDraft();
+    setRichStatus("Chọn nội dung để bắt đầu.");
+  });
   attachFiles?.addEventListener("click", () => fileInput?.click());
   attachImages?.addEventListener("click", () => imageInput?.click());
   fileInput?.addEventListener("change", () => {

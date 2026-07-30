@@ -42,6 +42,7 @@ DANGEROUS_UPLOAD_EXTENSIONS = {
 }
 
 IMAGE_EXTENSIONS = {".avif", ".bmp", ".gif", ".heic", ".heif", ".jpeg", ".jpg", ".png", ".webp"}
+GIF_EXTENSIONS = {".gif"}
 VIDEO_EXTENSIONS = {".3gp", ".m4v", ".mkv", ".mov", ".mp4", ".webm"}
 AUDIO_EXTENSIONS = {".aac", ".flac", ".m4a", ".mp3", ".oga", ".ogg", ".opus", ".wav", ".webm"}
 
@@ -61,6 +62,8 @@ def validate_upload_name(value: str) -> str:
 def infer_media_kind(filename: str, content_type: str | None) -> str:
     mime = str(content_type or "").split(";", 1)[0].strip().lower()
     suffix = Path(filename).suffix.lower()
+    if suffix in GIF_EXTENSIONS or mime == "image/gif":
+        return "gif"
     if mime.startswith("image/") or suffix in IMAGE_EXTENSIONS:
         return "image"
     if mime.startswith("video/") or suffix in VIDEO_EXTENSIONS:

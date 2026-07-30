@@ -1814,3 +1814,196 @@ def test_chat_media_upload_signed_preview_and_queue(client: TestClient):
     assert len(projected_media) == 1
     assert projected_media[0]["id"] == "zalo-media-message-1"
     assert projected_media[0]["job_id"] is None
+
+
+def test_chat_rich_media_catalog_favorites_and_queue(client: TestClient):
+    csrf = login(client)
+    account_id = client.post(
+        "/api/v1/accounts",
+        headers={"X-CSRF-Token": csrf},
+        json={
+            "name": "Rich media sender",
+            "imei": "imei-rich-media-12345",
+            "cookies": {"zpw_sek": "rich-media-secret"},
+            "listener_enabled": True,
+        },
+    ).json()["id"]
+    with client.app.state.database.session_factory() as session:
+        account = session.get(ZaloAccount, account_id)
+        account.status = "online"
+        account.listener_enabled = True
+        session.add(
+            Event(
+                account_id=account_id,
+                event_type="message.received",
+                thread_id="rich-destination",
+                payload={
+                    "message_id": "sticker-history-1",
+                    "author_id": "friend-1",
+                    "message": {
+                        "id": 43521,
+                        "catId": 11786,
+                        "type": 3,
+                    },
+                    "message_object": {
+                        "msgId": "sticker-history-1",
+                        "msgType": "chat.sticker",
+                        "dName": "Friend",
+                    },
+                    "thread_type": "USER",
+                },
+            )
+        )
+        session.commit()
+
+    catalog = client.get(
+        "/api/v1/chat/stickers",
+        params={"account_id": account_id},
+    )
+    assert catalog.status_code == 200
+    assert catalog.json()["recent"][0]["key"] == "11786:43521"
+    assert catalog.json()["favorite_count"] == 0
+
+    favorites = client.put(
+        "/api/v1/chat/stickers/preferences",
+        headers={"X-CSRF-Token": csrf},
+        json={
+            "account_id": account_id,
+            "favorites": [
+                {
+                    "sticker_id": "43521",
+                    "category_id": "11786",
+                    "sticker_type": 3,
+                    "width": 130,
+                    "height": 130,
+                }
+            ],
+        },
+    )
+    assert favorites.status_code == 200
+    assert favorites.json()["favorite_count"] == 1
+    assert favorites.json()["items"][0]["favorite"] is True
+
+    sticker = client.post(
+        "/api/v1/chat/rich-media",
+        headers={"X-CSRF-Token": csrf},
+        json={
+            "account_id": account_id,
+            "thread_id": "rich-destination",
+            "thread_type": "user",
+            "kind": "sticker",
+            "sticker_id": "43521",
+            "category_id": "11786",
+            "sticker_type": 3,
+        },
+    )
+    assert sticker.status_code == 202
+    assert sticker.json()["message"]["kind"] == "sticker"
+    assert sticker.json()["message"]["text"] == "[Sticker]"
+
+    link = client.post(
+        "/api/v1/chat/rich-media",
+        headers={"X-CSRF-Token": csrf},
+        json={
+            "account_id": account_id,
+            "thread_id": "rich-destination",
+            "thread_type": "user",
+            "kind": "link",
+            "url": "https://example.com/guide",
+            "title": "Hướng dẫn",
+            "description": "Đọc thêm",
+        },
+    )
+    assert link.status_code == 202
+    assert link.json()["message"]["kind"] == "link"
+
+    contact = client.post(
+        "/api/v1/chat/rich-media",
+        headers={"X-CSRF-Token": csrf},
+        json={
+            "account_id": account_id,
+            "thread_id": "rich-destination",
+            "thread_type": "user",
+            "kind": "contact",
+            "contact_user_id": "friend-2",
+            "contact_name": "Bảo An",
+        },
+    )
+    assert contact.status_code == 202
+    assert contact.json()["message"]["kind"] == "contact"
+
+    gif_upload = client.post(
+        "/api/v1/uploads",
+        headers={"X-CSRF-Token": csrf},
+        files={"file": ("wave.gif", b"GIF89a-rich", "image/gif")},
+    )
+    assert gif_upload.status_code == 201
+    assert gif_upload.json()["kind"] == "gif"
+    gif = client.post(
+        "/api/v1/chat/rich-media",
+        headers={"X-CSRF-Token": csrf},
+        json={
+            "account_id": account_id,
+            "thread_id": "rich-destination",
+            "thread_type": "user",
+            "kind": "gif",
+            "upload_token": gif_upload.json()["token"],
+        },
+    )
+    assert gif.status_code == 202
+    assert gif.json()["message"]["kind"] == "gif"
+
+    audio_upload = client.post(
+        "/api/v1/uploads",
+        headers={"X-CSRF-Token": csrf},
+        files={"file": ("voice.mp3", b"ID3-rich", "audio/mpeg")},
+    )
+    assert audio_upload.status_code == 201
+    assert audio_upload.json()["kind"] == "audio"
+    audio = client.post(
+        "/api/v1/chat/media",
+        headers={"X-CSRF-Token": csrf},
+        json={
+            "account_id": account_id,
+            "thread_id": "rich-destination",
+            "thread_type": "user",
+            "text": "",
+            "items": [
+                {
+                    "upload_token": audio_upload.json()["token"],
+                    "kind": "audio",
+                    "name": audio_upload.json()["name"],
+                    "content_type": audio_upload.json()["content_type"],
+                    "size_bytes": audio_upload.json()["size_bytes"],
+                }
+            ],
+        },
+    )
+    assert audio.status_code == 202
+    assert audio.json()["message"]["kind"] == "audio"
+
+    refreshed = client.get(
+        "/api/v1/chat/stickers",
+        params={"account_id": account_id},
+    )
+    assert refreshed.status_code == 200
+    assert refreshed.json()["recent"][0]["key"] == "11786:43521"
+    with client.app.state.database.session_factory() as session:
+        jobs = session.scalars(
+            select(Job).where(
+                Job.account_id == account_id,
+                Job.action == "__chat_rich_media__",
+            )
+        ).all()
+        assert {job.payload["kind"] for job in jobs} == {
+            "sticker",
+            "link",
+            "contact",
+            "gif",
+        }
+        audit = session.scalar(
+            select(AuditLog).where(
+                AuditLog.action == "chat.sticker_preferences.update"
+            )
+        )
+        assert audit is not None

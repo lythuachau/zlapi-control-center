@@ -61,7 +61,7 @@ class ChatMessageCreate(BaseModel):
 
 class ChatMediaItem(BaseModel):
     upload_token: str = Field(pattern=r"^upload:[a-f0-9]{32}$")
-    kind: Literal["image", "video", "audio", "file"]
+    kind: Literal["image", "gif", "video", "audio", "file"]
     name: str = Field(min_length=1, max_length=255)
     content_type: str | None = Field(default=None, max_length=120)
     size_bytes: int = Field(ge=1)
@@ -82,6 +82,68 @@ class ChatMediaCreate(BaseModel):
     @classmethod
     def media_caption_trimmed(cls, value: str) -> str:
         return value.strip()
+
+
+class ChatRichMediaCreate(BaseModel):
+    account_id: str
+    thread_id: str = Field(min_length=1, max_length=100)
+    thread_type: Literal["user", "group"] = "user"
+    kind: Literal["sticker", "gif", "link", "contact"]
+    text: str = Field(default="", max_length=4000)
+    reply_event_id: int | None = Field(default=None, ge=1)
+    upload_token: str | None = Field(default=None, pattern=r"^upload:[a-f0-9]{32}$")
+    sticker_id: str | None = Field(default=None, min_length=1, max_length=40)
+    category_id: str | None = Field(default=None, min_length=1, max_length=40)
+    sticker_type: int = Field(default=1, ge=0, le=100)
+    url: str | None = Field(default=None, max_length=2000)
+    title: str | None = Field(default=None, max_length=240)
+    description: str | None = Field(default=None, max_length=1000)
+    thumbnail_url: str | None = Field(default=None, max_length=2000)
+    contact_user_id: str | None = Field(default=None, min_length=1, max_length=100)
+    contact_name: str | None = Field(default=None, max_length=160)
+    contact_qr_url: str | None = Field(default=None, max_length=2000)
+    contact_phone: str | None = Field(default=None, max_length=40)
+    width: int | None = Field(default=None, ge=1, le=20_000)
+    height: int | None = Field(default=None, ge=1, le=20_000)
+
+    @field_validator("text", "title", "description", "contact_name", "contact_phone")
+    @classmethod
+    def rich_text_trimmed(cls, value: str | None) -> str | None:
+        return value.strip() if isinstance(value, str) else value
+
+    @field_validator("url", "thumbnail_url", "contact_qr_url")
+    @classmethod
+    def rich_url_is_http(cls, value: str | None) -> str | None:
+        if value is None or not value.strip():
+            return None
+        value = value.strip()
+        if not value.lower().startswith(("http://", "https://")):
+            raise ValueError("URL phải bắt đầu bằng http:// hoặc https://")
+        return value
+
+
+class ChatStickerPreference(BaseModel):
+    sticker_id: str = Field(pattern=r"^[1-9][0-9]{0,39}$")
+    category_id: str = Field(pattern=r"^[1-9][0-9]{0,39}$")
+    sticker_type: int = Field(default=1, ge=0, le=100)
+    thumbnail_url: str | None = Field(default=None, max_length=2000)
+    width: int = Field(default=130, ge=1, le=2000)
+    height: int = Field(default=130, ge=1, le=2000)
+
+    @field_validator("thumbnail_url")
+    @classmethod
+    def sticker_thumbnail_is_http(cls, value: str | None) -> str | None:
+        if value is None or not value.strip():
+            return None
+        value = value.strip()
+        if not value.lower().startswith(("http://", "https://")):
+            raise ValueError("Ảnh sticker phải bắt đầu bằng http:// hoặc https://")
+        return value
+
+
+class ChatStickerPreferencesUpdate(BaseModel):
+    account_id: str
+    favorites: list[ChatStickerPreference] = Field(default_factory=list, max_length=48)
 
 
 class ChatReadStateUpdate(BaseModel):

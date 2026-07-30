@@ -24,6 +24,53 @@ class FakeMediaClient:
         self.calls.append(("file", url, thread_id, thread_type, kwargs))
         return {"sent": "file"}
 
+    def sendRemoteVoice(self, url, thread_id, thread_type, **kwargs):
+        self.calls.append(("audio", url, thread_id, thread_type, kwargs))
+        return {"sent": "audio"}
+
+    def sendLocalGif(self, path, thumbnail_url, thread_id, thread_type, **kwargs):
+        self.calls.append(
+            ("gif", path, thumbnail_url, thread_id, thread_type, kwargs)
+        )
+        return {"sent": "gif"}
+
+    def sendSticker(
+        self,
+        sticker_type,
+        sticker_id,
+        category_id,
+        thread_id,
+        thread_type,
+    ):
+        self.calls.append(
+            (
+                "sticker",
+                sticker_type,
+                sticker_id,
+                category_id,
+                thread_id,
+                thread_type,
+            )
+        )
+        return {"sent": "sticker"}
+
+    def sendLink(self, url, title, thread_id, thread_type, **kwargs):
+        self.calls.append(("link", url, title, thread_id, thread_type, kwargs))
+        return {"sent": "link"}
+
+    def sendBusinessCard(
+        self,
+        user_id,
+        qr_url,
+        thread_id,
+        thread_type,
+        **kwargs,
+    ):
+        self.calls.append(
+            ("contact", user_id, qr_url, thread_id, thread_type, kwargs)
+        )
+        return {"sent": "contact"}
+
     def sendMessage(self, message, thread_id, thread_type):
         self.calls.append(("message", message.text, thread_id, thread_type))
         return {"sent": "message"}
@@ -123,6 +170,147 @@ def test_connector_sends_mixed_media_without_automatic_retry(settings, tmp_path)
         "http://zlapi.example.test/media/outbound/"
     )
     assert client.calls[2][1] == "Tài liệu tham khảo"
+    database.dispose()
+
+
+def test_connector_sends_rich_media_and_audio(settings):
+    settings.domain = "zlapi.example.test"
+    settings.ensure_directories()
+    database = Database(settings)
+    database.create_schema()
+    gif_path = settings.upload_dir / "reaction.gif"
+    audio_path = settings.upload_dir / "voice.mp3"
+    gif_path.write_bytes(b"gif-fixture")
+    audio_path.write_bytes(b"audio-fixture")
+    client = FakeMediaClient()
+    connector = ZaloConnector(settings, object())
+    connector.client_for = lambda _account: client
+
+    with database.session_factory() as session:
+        account = ZaloAccount(
+            name="Rich media connector",
+            cookie_cipher="unused",
+            imei_cipher="unused",
+            status="online",
+            enabled=True,
+        )
+        session.add(account)
+        session.add_all(
+            [
+                MediaUpload(
+                    id="e" * 32,
+                    original_name="reaction.gif",
+                    stored_path=str(gif_path),
+                    size_bytes=gif_path.stat().st_size,
+                    content_type="image/gif",
+                    expires_at=utcnow() + timedelta(days=1),
+                ),
+                MediaUpload(
+                    id="f" * 32,
+                    original_name="voice.mp3",
+                    stored_path=str(audio_path),
+                    size_bytes=audio_path.stat().st_size,
+                    content_type="audio/mpeg",
+                    expires_at=utcnow() + timedelta(days=1),
+                ),
+            ]
+        )
+        session.commit()
+
+        sticker = connector.send_chat_rich_media(
+            session,
+            account,
+            {
+                "thread_id": "destination",
+                "thread_type": "user",
+                "kind": "sticker",
+                "media": {
+                    "sticker_id": "43521",
+                    "category_id": "11786",
+                    "sticker_type": 3,
+                },
+            },
+        )
+        gif = connector.send_chat_rich_media(
+            session,
+            account,
+            {
+                "thread_id": "destination",
+                "thread_type": "user",
+                "kind": "gif",
+                "media": {
+                    "upload_token": f"upload:{'e' * 32}",
+                    "thumbnail_url": "https://zlapi.example.test/reaction.gif",
+                    "width": 320,
+                    "height": 240,
+                },
+            },
+        )
+        link = connector.send_chat_rich_media(
+            session,
+            account,
+            {
+                "thread_id": "destination",
+                "thread_type": "user",
+                "kind": "link",
+                "text": "Đọc thêm",
+                "media": {
+                    "url": "https://example.com/guide",
+                    "title": "Hướng dẫn",
+                    "description": "Tài liệu tham khảo",
+                },
+            },
+        )
+        contact = connector.send_chat_rich_media(
+            session,
+            account,
+            {
+                "thread_id": "destination",
+                "thread_type": "user",
+                "kind": "contact",
+                "media": {
+                    "contact_user_id": "friend-123",
+                    "contact_qr_url": "",
+                    "contact_phone": "0900000001",
+                },
+            },
+        )
+        audio = connector.send_chat_media(
+            session,
+            account,
+            {
+                "thread_id": "destination",
+                "thread_type": "user",
+                "items": [
+                    {
+                        "upload_token": f"upload:{'f' * 32}",
+                        "kind": "audio",
+                    }
+                ],
+            },
+        )
+
+    assert [sticker["kind"], gif["kind"], link["kind"], contact["kind"]] == [
+        "sticker",
+        "gif",
+        "link",
+        "contact",
+    ]
+    assert audio["count"] == 1
+    assert [call[0] for call in client.calls] == [
+        "sticker",
+        "gif",
+        "link",
+        "contact",
+        "audio",
+    ]
+    assert client.calls[0][1:4] == (3, 43521, 11786)
+    assert client.calls[1][5]["width"] == 320
+    assert client.calls[2][5]["message"].text == "Đọc thêm"
+    assert client.calls[3][1] == "friend-123"
+    assert client.calls[4][1].startswith(
+        f"http://zlapi.example.test/media/outbound/{'f' * 32}"
+    )
     database.dispose()
 
 

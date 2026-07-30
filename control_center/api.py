@@ -7,6 +7,7 @@ import secrets
 from datetime import timedelta
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 import zstandard
 from fastapi import APIRouter, Depends, File, HTTPException, Query, Request, UploadFile, status
@@ -74,6 +75,8 @@ from .schemas import (
     ChatMessageCreate,
     ChatReactionCreate,
     ChatReadStateUpdate,
+    ChatRichMediaCreate,
+    ChatStickerPreferencesUpdate,
     ChatUndoCreate,
     PasswordChange,
     ReactionCatalogUpdate,
@@ -292,6 +295,168 @@ def _contacts_job_payload(job: Job | None) -> dict | None:
         "created_at": job.created_at,
         "started_at": job.started_at,
         "finished_at": job.finished_at,
+    }
+
+
+def _sticker_setting_key(principal: Principal, account_id: str) -> str:
+    return f"chat.stickers.{principal.kind}.{principal.id}.{account_id}"
+
+
+def _sticker_snapshot(value: Any, *, last_used_at: Any = None) -> dict | None:
+    if not isinstance(value, dict):
+        return None
+    sticker_id = _contact_text(value.get("sticker_id") or value.get("stickerId"))
+    category_id = _contact_text(
+        value.get("category_id")
+        or value.get("categoryId")
+        or value.get("cate_id")
+        or value.get("cateId")
+    )
+    if (
+        not sticker_id
+        or not category_id
+        or not sticker_id.isdigit()
+        or not category_id.isdigit()
+        or int(sticker_id) <= 0
+        or int(category_id) <= 0
+    ):
+        return None
+
+    def bounded_int(candidate: Any, fallback: int, upper: int) -> int:
+        try:
+            parsed = int(candidate)
+        except (TypeError, ValueError):
+            return fallback
+        return parsed if 0 <= parsed <= upper else fallback
+
+    thumbnail_url = _contact_text(
+        value.get("thumbnail_url")
+        or value.get("thumbnailUrl")
+        or value.get("url")
+    )
+    if thumbnail_url:
+        parsed = urlsplit(thumbnail_url)
+        if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+            thumbnail_url = None
+    thumbnail_url = thumbnail_url or (
+        "https://zalo-api.zadn.vn/api/emoticon/sticker/"
+        f"webpc?eid={sticker_id}&size=130"
+    )
+    used_at = (
+        last_used_at.isoformat()
+        if hasattr(last_used_at, "isoformat")
+        else _contact_text(last_used_at)
+    )
+    return {
+        "key": f"{category_id}:{sticker_id}",
+        "sticker_id": sticker_id,
+        "category_id": category_id,
+        "sticker_type": bounded_int(
+            value.get("sticker_type") or value.get("stickerType"),
+            1,
+            100,
+        ),
+        "thumbnail_url": thumbnail_url,
+        "width": bounded_int(value.get("width"), 130, 2000) or 130,
+        "height": bounded_int(value.get("height"), 130, 2000) or 130,
+        "last_used_at": used_at,
+    }
+
+
+def _chat_sticker_catalog(
+    session: Session,
+    *,
+    account_id: str,
+    principal: Principal,
+) -> dict:
+    setting_key = _sticker_setting_key(principal, account_id)
+    setting = session.get(AppSetting, setting_key)
+    setting_value = setting.value if setting and isinstance(setting.value, dict) else {}
+    stored_favorites = setting_value.get("favorites")
+    stored_favorites = stored_favorites if isinstance(stored_favorites, list) else []
+
+    favorites: list[dict] = []
+    favorite_keys: set[str] = set()
+    for value in stored_favorites:
+        sticker = _sticker_snapshot(value)
+        if sticker is None or sticker["key"] in favorite_keys:
+            continue
+        sticker["favorite"] = True
+        favorite_keys.add(sticker["key"])
+        favorites.append(sticker)
+
+    candidates: list[tuple[Any, dict]] = []
+    events = session.scalars(
+        select(Event)
+        .where(
+            Event.account_id == account_id,
+            Event.event_type == "message.received",
+        )
+        .order_by(desc(Event.id))
+        .limit(1500)
+    ).all()
+    for event in events:
+        kind, media = message_media(event.payload or {})
+        if kind != "sticker" or not isinstance(media, dict):
+            continue
+        sticker = _sticker_snapshot(media, last_used_at=event.created_at)
+        if sticker is not None:
+            candidates.append((event.created_at, sticker))
+
+    jobs = session.scalars(
+        select(Job)
+        .where(
+            Job.account_id == account_id,
+            Job.action == "__chat_rich_media__",
+            Job.status.in_(("queued", "running", "succeeded")),
+        )
+        .order_by(desc(Job.created_at))
+        .limit(500)
+    ).all()
+    for job in jobs:
+        payload = job.payload or {}
+        context = payload.get("_chat_context")
+        context = context if isinstance(context, dict) else {}
+        media = context.get("media") or payload.get("media")
+        if str(context.get("kind") or payload.get("kind") or "") != "sticker":
+            continue
+        sticker = _sticker_snapshot(media, last_used_at=job.created_at)
+        if sticker is not None:
+            candidates.append((job.created_at, sticker))
+
+    candidates.sort(key=lambda item: item[0], reverse=True)
+    recent: list[dict] = []
+    recent_keys: set[str] = set()
+    for _, sticker in candidates:
+        if sticker["key"] in recent_keys:
+            continue
+        sticker["favorite"] = sticker["key"] in favorite_keys
+        recent.append(sticker)
+        recent_keys.add(sticker["key"])
+        if len(recent) >= 48:
+            break
+
+    items = [*favorites]
+    item_keys = set(favorite_keys)
+    for sticker in recent:
+        if sticker["key"] in item_keys:
+            favorite = next(
+                (item for item in items if item["key"] == sticker["key"]),
+                None,
+            )
+            if favorite is not None and sticker.get("last_used_at"):
+                favorite["last_used_at"] = sticker["last_used_at"]
+            continue
+        items.append(sticker)
+        item_keys.add(sticker["key"])
+
+    return {
+        "items": items[:120],
+        "favorites": favorites,
+        "recent": recent,
+        "favorite_count": len(favorites),
+        "recent_count": len(recent),
+        "source": "Lịch sử Listener và sticker đã gửi từ ZChat",
     }
 
 
@@ -1246,6 +1411,84 @@ def list_chat_contacts(
     }
 
 
+@router.get("/chat/stickers")
+def list_chat_stickers(
+    account_id: str,
+    session: Session = Depends(get_db),
+    principal: Principal = Depends(require_scope("read")),
+) -> dict:
+    if session.get(ZaloAccount, account_id) is None:
+        raise HTTPException(status_code=404, detail="Account not found")
+    return _chat_sticker_catalog(
+        session,
+        account_id=account_id,
+        principal=principal,
+    )
+
+
+@router.put("/chat/stickers/preferences")
+def update_chat_sticker_preferences(
+    body: ChatStickerPreferencesUpdate,
+    request: Request,
+    session: Session = Depends(get_db),
+    principal: Principal = Depends(require_scope("jobs:create")),
+    _: None = Depends(verify_csrf),
+) -> dict:
+    if session.get(ZaloAccount, body.account_id) is None:
+        raise HTTPException(status_code=404, detail="Account not found")
+    favorites: list[dict] = []
+    seen: set[str] = set()
+    for value in body.favorites:
+        sticker = _sticker_snapshot(value.model_dump())
+        if sticker is None or sticker["key"] in seen:
+            continue
+        favorites.append(
+            {
+                key: sticker[key]
+                for key in (
+                    "sticker_id",
+                    "category_id",
+                    "sticker_type",
+                    "thumbnail_url",
+                    "width",
+                    "height",
+                )
+            }
+        )
+        seen.add(sticker["key"])
+
+    setting_key = _sticker_setting_key(principal, body.account_id)
+    setting = session.get(AppSetting, setting_key)
+    if setting is None:
+        setting = AppSetting(
+            key=setting_key,
+            value={"favorites": favorites},
+            updated_by_id=principal.id if principal.kind == "user" else None,
+        )
+        session.add(setting)
+    else:
+        setting.value = {"favorites": favorites}
+        setting.updated_by_id = principal.id if principal.kind == "user" else None
+    session.commit()
+    write_audit(
+        session,
+        principal=principal,
+        action="chat.sticker_preferences.update",
+        resource_type="app_setting",
+        resource_id=setting_key,
+        details={
+            "account_id": body.account_id,
+            "favorite_count": len(favorites),
+        },
+        request=request,
+    )
+    return _chat_sticker_catalog(
+        session,
+        account_id=body.account_id,
+        principal=principal,
+    )
+
+
 @router.get("/chat/groups/{thread_id}")
 def get_chat_group_info(
     thread_id: str,
@@ -2119,6 +2362,120 @@ def send_chat_media(
             "kinds": [item["kind"] for item in media_items],
             "caption_length": len(body.text),
             "reply_event_id": body.reply_event_id,
+        },
+        request=request,
+    )
+    return {
+        "job_id": job.id,
+        "status": job.status,
+        "message": outgoing_message(job),
+    }
+
+
+@router.post("/chat/rich-media", status_code=status.HTTP_202_ACCEPTED)
+def send_chat_rich_media(
+    body: ChatRichMediaCreate,
+    request: Request,
+    session: Session = Depends(get_db),
+    principal: Principal = Depends(require_scope("jobs:create")),
+    _: None = Depends(verify_csrf),
+) -> dict:
+    account = _require_chat_account(session, body.account_id)
+    media: dict[str, Any] = {"kind": body.kind}
+    if body.kind == "sticker":
+        try:
+            sticker_id = str(int(body.sticker_id or "0"))
+            category_id = str(int(body.category_id or "0"))
+        except (TypeError, ValueError) as exc:
+            raise HTTPException(status_code=422, detail="Sticker ID và category ID phải là số") from exc
+        if sticker_id == "0" or category_id == "0":
+            raise HTTPException(status_code=422, detail="Sticker cần sticker_id và category_id")
+        media.update(
+            {
+                "sticker_id": sticker_id,
+                "category_id": category_id,
+                "sticker_type": body.sticker_type,
+                "url": body.thumbnail_url,
+                "thumbnail_url": body.thumbnail_url,
+                "width": body.width or 130,
+                "height": body.height or 130,
+            }
+        )
+    elif body.kind == "gif":
+        upload_id = (body.upload_token or "").removeprefix("upload:")
+        upload = session.get(MediaUpload, upload_id) if upload_id else None
+        if upload is None or is_expired(upload.expires_at):
+            raise HTTPException(status_code=422, detail="Hãy chọn tệp GIF hợp lệ trước khi gửi")
+        if principal.kind == "user" and upload.created_by_id != principal.id:
+            raise HTTPException(status_code=403, detail="Không được dùng upload của người khác")
+        if infer_media_kind(upload.original_name, upload.content_type) != "gif":
+            raise HTTPException(status_code=422, detail="Tệp được chọn không phải GIF")
+        media.update(
+            {
+                "upload_token": body.upload_token,
+                "filename": safe_upload_name(upload.original_name),
+                "size": upload.size_bytes,
+                "content_type": upload.content_type,
+                "url": outbound_media_url(request.app.state.settings, upload.id),
+                "thumbnail_url": body.thumbnail_url
+                or outbound_media_url(request.app.state.settings, upload.id),
+                "width": body.width or 500,
+                "height": body.height or 500,
+            }
+        )
+    elif body.kind == "link":
+        parsed = urlsplit(body.url or "")
+        if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+            raise HTTPException(status_code=422, detail="Liên kết phải là URL http(s) hợp lệ")
+        media.update(
+            {
+                "url": body.url,
+                "title": body.title or parsed.netloc,
+                "description": body.description,
+                "thumbnail_url": body.thumbnail_url,
+            }
+        )
+    elif body.kind == "contact":
+        if not body.contact_user_id:
+            raise HTTPException(status_code=422, detail="Hãy chọn một người trong danh bạ")
+        media.update(
+            {
+                "contact_user_id": body.contact_user_id,
+                "contact_name": body.contact_name,
+                "contact_qr_url": body.contact_qr_url or "",
+                "contact_phone": body.contact_phone,
+            }
+        )
+
+    context = {"kind": body.kind, "media": media}
+    payload = {
+        "thread_id": body.thread_id,
+        "thread_type": body.thread_type,
+        "kind": body.kind,
+        "media": media,
+        "text": body.text,
+        "_chat_context": context,
+    }
+    job = enqueue_job(
+        session,
+        account_id=account.id,
+        action="__chat_rich_media__",
+        payload=payload,
+        created_by_id=principal.id if principal.kind == "user" else None,
+        priority=45,
+        max_attempts=1,
+    )
+    write_audit(
+        session,
+        principal=principal,
+        action="chat.rich_media.enqueue",
+        resource_type="job",
+        resource_id=job.id,
+        details={
+            "account_id": account.id,
+            "thread_id": body.thread_id,
+            "thread_type": body.thread_type,
+            "kind": body.kind,
         },
         request=request,
     )

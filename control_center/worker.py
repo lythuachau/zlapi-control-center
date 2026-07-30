@@ -99,6 +99,12 @@ class Worker:
                         account,
                         job.payload,
                     )
+                elif action == "__chat_rich_media__":
+                    result = self.connector.send_chat_rich_media(
+                        session,
+                        account,
+                        job.payload,
+                    )
                 elif action == "__chat_group_info__":
                     result = self.connector.fetch_chat_group_info(
                         session,

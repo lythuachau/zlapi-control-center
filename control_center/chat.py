@@ -18,8 +18,11 @@ OUTBOUND_CHAT_ACTIONS = {
     "replyMessage",
     "__chat_forward__",
     "__chat_media__",
+    "__chat_rich_media__",
 }
 MEDIA_LABELS = {
+    "gif": "[GIF]",
+    "contact": "[Danh thiáº¿p]",
     "image": "[Hình ảnh]",
     "video": "[Video]",
     "audio": "[Tin nhắn thoại]",
@@ -251,7 +254,10 @@ def message_media(payload: dict) -> tuple[str, dict | None]:
             "height": _number(params.get("height") or content.get("height")),
             "animated": msg_type == "chat.gif",
         }
-        return "image", {key: value for key, value in media.items() if value is not None}
+        return (
+            "gif" if msg_type == "chat.gif" else "image",
+            {key: value for key, value in media.items() if value is not None},
+        )
 
     if msg_type == "chat.video.msg":
         media = {
@@ -366,6 +372,38 @@ def message_media(payload: dict) -> tuple[str, dict | None]:
             "action": _text(content.get("action")),
         }
         return "poll", {key: value for key, value in media.items() if value is not None}
+
+    if msg_type == "chat.recommended":
+        contact_user_id = _mapping_value(
+            params,
+            ("contactUid", "contact_uid", "userId", "uid"),
+        ) or _mapping_value(
+            content,
+            ("contactUid", "contact_uid", "userId", "uid"),
+        )
+        if contact_user_id:
+            media = {
+                "contact_user_id": contact_user_id,
+                "contact_name": _mapping_value(
+                    content,
+                    ("title", "displayName", "name"),
+                )
+                or _mapping_value(
+                    params,
+                    ("displayName", "name", "title"),
+                ),
+                "contact_phone": _mapping_value(
+                    params,
+                    ("phone", "phoneNumber"),
+                )
+                or _mapping_value(content, ("phone", "phoneNumber")),
+                "thumbnail_url": thumb
+                or _safe_url(params.get("qrCodeUrl"))
+                or _safe_url(content.get("qrCodeUrl")),
+            }
+            return "contact", {
+                key: value for key, value in media.items() if value is not None
+            }
 
     if msg_type in {"chat.recommended", "chat.link", "chat.location.new"}:
         media = {
@@ -494,11 +532,15 @@ def outgoing_message(job: Job) -> dict:
     media = context.get("media") if isinstance(context.get("media"), dict) else None
     message_kind = str(context.get("kind") or "text")
     media_labels = {
+        "gif": "[GIF]",
+        "contact": "[Danh thiáº¿p]",
         "image": "[Hình ảnh]",
         "video": "[Video]",
         "audio": "[Tin nhắn thoại]",
         "file": "[Tệp đính kèm]",
         "media": "[Nhiều nội dung đính kèm]",
+        "sticker": "[Sticker]",
+        "link": "[Liên kết]",
     }
     text = (
         _text(message)
@@ -580,7 +622,7 @@ def conversation_payloads(
         select(Job)
         .where(
             Job.account_id == account.id,
-            Job.action.in_(("sendMessage", "replyMessage", "__chat_forward__", "__chat_media__")),
+            Job.action.in_(("sendMessage", "replyMessage", "__chat_forward__", "__chat_media__", "__chat_rich_media__")),
         )
         .order_by(desc(Job.created_at))
         .limit(scan_limit)

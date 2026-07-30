@@ -1,7 +1,7 @@
 {% extends "base.html" %}
 
 {% block head %}
-  <link rel="stylesheet" href="{{ url_for('static', path='/css/chat.css') }}?v=20260730-group-polls">
+  <link rel="stylesheet" href="{{ url_for('static', path='/css/chat.css') }}?v=20260730-rich-media">
 {% endblock %}
 
 {% block content %}
@@ -263,6 +263,12 @@
         <div class="zchat-compose-tools">
           <button type="button" id="chat-attach-files" aria-label="Đính kèm tệp" title="Đính kèm tệp">＋</button>
           <button type="button" id="chat-attach-images" aria-label="Gửi ảnh hoặc video" title="Gửi ảnh hoặc video">▧</button>
+          <button
+            type="button"
+            id="chat-rich-media-open"
+            aria-label="Sticker, GIF và nội dung nâng cao"
+            title="Sticker, GIF và nội dung nâng cao"
+          >✦</button>
           <input id="chat-file-input" type="file" multiple hidden>
           <input id="chat-image-input" type="file" accept="image/*,video/*" multiple hidden>
         </div>
@@ -583,6 +589,153 @@
     </form>
   </dialog>
 
+  <dialog class="zchat-dialog zchat-rich-media-dialog" id="chat-rich-media-dialog">
+    <form method="dialog" class="zchat-dialog-shell wide">
+      <header>
+        <span>
+          <small>NỘI DUNG NÂNG CAO</small>
+          <strong>Sticker, GIF, liên kết và danh thiếp</strong>
+        </span>
+        <button value="cancel" aria-label="Đóng">×</button>
+      </header>
+
+      <div class="zchat-rich-layout">
+        <section class="zchat-rich-library">
+          <nav class="zchat-rich-tabs" role="tablist" aria-label="Loại nội dung">
+            <button class="active" type="button" role="tab" aria-selected="true" data-rich-tab="sticker">
+              Sticker
+            </button>
+            <button type="button" role="tab" aria-selected="false" data-rich-tab="gif">
+              GIF
+            </button>
+            <button type="button" role="tab" aria-selected="false" data-rich-tab="link">
+              Liên kết
+            </button>
+            <button type="button" role="tab" aria-selected="false" data-rich-tab="contact">
+              Danh thiếp
+            </button>
+            <button type="button" role="tab" aria-selected="false" data-rich-tab="audio">
+              Audio
+            </button>
+          </nav>
+
+          <div class="zchat-rich-panel" data-rich-panel="sticker">
+            <div class="zchat-sticker-toolbar">
+              <label class="zchat-dialog-search">
+                <span>⌕</span>
+                <input id="chat-sticker-search" type="search" placeholder="Tìm theo mã sticker hoặc bộ…">
+              </label>
+              <div class="zchat-sticker-filters" role="tablist" aria-label="Lọc sticker">
+                <button class="active" type="button" data-sticker-filter="all">Tất cả</button>
+                <button type="button" data-sticker-filter="recent">Gần đây</button>
+                <button type="button" data-sticker-filter="favorite">Yêu thích</button>
+              </div>
+            </div>
+            <div class="zchat-sticker-grid" id="chat-sticker-grid"></div>
+            <p class="zchat-rich-help" id="chat-sticker-status">
+              Sticker được lấy từ lịch sử Listener và những sticker đã gửi bằng ZChat.
+            </p>
+            <details class="zchat-sticker-manual">
+              <summary>Thêm sticker bằng mã</summary>
+              <div>
+                <label>
+                  <span>Sticker ID</span>
+                  <input id="chat-sticker-id" inputmode="numeric" maxlength="40" placeholder="43521">
+                </label>
+                <label>
+                  <span>Category ID</span>
+                  <input id="chat-sticker-category" inputmode="numeric" maxlength="40" placeholder="11786">
+                </label>
+                <label>
+                  <span>Loại</span>
+                  <input id="chat-sticker-type" type="number" min="0" max="100" value="1">
+                </label>
+                <button type="button" id="chat-sticker-use-manual">Xem trước</button>
+              </div>
+            </details>
+          </div>
+
+          <div class="zchat-rich-panel" data-rich-panel="gif" hidden>
+            <div class="zchat-rich-upload-zone" id="chat-gif-select">
+              <span>GIF</span>
+              <strong>Chọn ảnh động từ máy</strong>
+              <small>Tệp .gif, tối đa {{ max_upload_mb }} MB</small>
+              <button type="button">Chọn GIF</button>
+            </div>
+            <input id="chat-gif-input" type="file" accept="image/gif,.gif" hidden>
+            <p class="zchat-rich-help">GIF chỉ được tải lên khi bạn bấm gửi.</p>
+          </div>
+
+          <div class="zchat-rich-panel" data-rich-panel="link" hidden>
+            <div class="zchat-rich-form">
+              <label class="wide">
+                <span>Địa chỉ liên kết *</span>
+                <input id="chat-link-url" type="url" maxlength="2000" placeholder="https://example.com">
+              </label>
+              <label class="wide">
+                <span>Tiêu đề</span>
+                <input id="chat-link-title" maxlength="240" placeholder="Tên nội dung">
+              </label>
+              <label class="wide">
+                <span>Mô tả</span>
+                <textarea id="chat-link-description" rows="3" maxlength="1000" placeholder="Mô tả ngắn hiển thị trong thẻ liên kết"></textarea>
+              </label>
+              <label class="wide">
+                <span>Ảnh đại diện URL</span>
+                <input id="chat-link-thumbnail" type="url" maxlength="2000" placeholder="https://example.com/preview.jpg">
+              </label>
+            </div>
+            <p class="zchat-rich-help">Ảnh đại diện là tùy chọn. Zalo có thể tự tạo preview từ URL.</p>
+          </div>
+
+          <div class="zchat-rich-panel" data-rich-panel="contact" hidden>
+            <label class="zchat-dialog-search">
+              <span>⌕</span>
+              <input id="chat-rich-contact-search" type="search" placeholder="Tìm tên, số điện thoại hoặc ID…">
+            </label>
+            <div class="zchat-rich-contact-list" id="chat-rich-contact-list"></div>
+            <p class="zchat-rich-help">
+              Danh thiếp dùng API Zalo Web không chính thức và được đánh dấu Không ổn định.
+            </p>
+          </div>
+
+          <div class="zchat-rich-panel" data-rich-panel="audio" hidden>
+            <div class="zchat-rich-upload-zone" id="chat-audio-select">
+              <span>AUD</span>
+              <strong>Chọn tin nhắn thoại hoặc tệp âm thanh</strong>
+              <small>MP3, M4A, OGG, OPUS, WAV… tối đa {{ max_upload_mb }} MB</small>
+              <button type="button">Chọn audio</button>
+            </div>
+            <input id="chat-audio-input" type="file" accept="audio/*,.aac,.flac,.m4a,.mp3,.oga,.ogg,.opus,.wav" hidden>
+            <p class="zchat-rich-help">
+              Audio được gửi bằng Remote Voice; một số định dạng có thể bị Zalo từ chối.
+            </p>
+          </div>
+        </section>
+
+        <aside class="zchat-rich-preview">
+          <span class="zchat-rich-preview-label">XEM TRƯỚC</span>
+          <div class="zchat-rich-preview-card empty" id="chat-rich-preview-card">
+            <div class="zchat-rich-preview-media" id="chat-rich-preview-media">✦</div>
+            <strong id="chat-rich-preview-title">Chưa chọn nội dung</strong>
+            <p id="chat-rich-preview-copy">
+              Chọn một sticker, GIF, liên kết, danh thiếp hoặc audio để kiểm tra trước khi gửi.
+            </p>
+            <small id="chat-rich-preview-meta">Không có dữ liệu nào được gửi ở bước này.</small>
+          </div>
+        </aside>
+      </div>
+
+      <footer>
+        <span id="chat-rich-status">Chọn nội dung để bắt đầu.</span>
+        <button type="button" value="cancel" data-dialog-close>Hủy</button>
+        <button class="primary" id="chat-rich-send" type="button" disabled>
+          Gửi nội dung
+        </button>
+      </footer>
+    </form>
+  </dialog>
+
   <dialog class="zchat-dialog zchat-reaction-manager" id="chat-reaction-manager">
     <form method="dialog" class="zchat-dialog-shell wide">
       <header>
@@ -663,5 +816,5 @@
 {% endblock %}
 
 {% block scripts %}
-  <script defer src="{{ url_for('static', path='/js/chat.js') }}?v=20260730-group-polls"></script>
+  <script defer src="{{ url_for('static', path='/js/chat.js') }}?v=20260730-rich-media"></script>
 {% endblock %}

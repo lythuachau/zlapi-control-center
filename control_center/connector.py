@@ -1150,6 +1150,16 @@ class ZaloConnector:
                         height=int(item.get("height") or 2560),
                         message=Message(text=text_value) if native_caption else None,
                     )
+                elif kind == "gif":
+                    result = client.sendLocalGif(
+                        str(path),
+                        outbound_media_url(self.settings, upload.id),
+                        thread_id,
+                        thread_type,
+                        gifName=Path(upload.original_name).name or "sticker.gif",
+                        width=int(item.get("width") or 500),
+                        height=int(item.get("height") or 500),
+                    )
                 elif kind == "video":
                     video_metadata, thumbnail = self._prepare_video_upload(
                         session,
@@ -1226,6 +1236,94 @@ class ZaloConnector:
 
         self._record_success(session, account)
         return {"items": results, "count": len(resolved)}
+
+    def send_chat_rich_media(
+        self,
+        session: Session,
+        account: ZaloAccount,
+        payload: dict,
+    ) -> dict:
+        """Send a sticker, GIF, link, or business card from the chat composer."""
+        if not account.enabled:
+            raise RuntimeError("Zalo account is disabled")
+        thread_id = str(payload.get("thread_id") or "")
+        if not thread_id:
+            raise ValueError("Rich media job requires a thread ID")
+        kind = str(payload.get("kind") or "")
+        media = payload.get("media") if isinstance(payload.get("media"), dict) else {}
+        text_value = str(payload.get("text") or "").strip()
+        thread_type = self._thread_type(payload.get("thread_type"))
+        client = self.client_for(account)
+        _limiter(account.id).wait()
+        try:
+            if kind == "sticker":
+                sticker_id = int(media.get("sticker_id") or 0)
+                category_id = int(media.get("category_id") or 0)
+                if sticker_id <= 0 or category_id <= 0:
+                    raise ValueError("Sticker cần sticker_id và category_id hợp lệ")
+                result = client.sendSticker(
+                    int(media.get("sticker_type") or 1),
+                    sticker_id,
+                    category_id,
+                    thread_id,
+                    thread_type,
+                )
+            elif kind == "gif":
+                upload, path = self._resolve_upload_record(
+                    session,
+                    str(media.get("upload_token") or ""),
+                )
+                if upload.original_name.lower().rsplit(".", 1)[-1] != "gif":
+                    raise ValueError("GIF cần tệp .gif hợp lệ")
+                result = client.sendLocalGif(
+                    str(path),
+                    str(media.get("thumbnail_url") or outbound_media_url(self.settings, upload.id)),
+                    thread_id,
+                    thread_type,
+                    gifName=Path(upload.original_name).name or "sticker.gif",
+                    width=int(media.get("width") or 500),
+                    height=int(media.get("height") or 500),
+                )
+            elif kind == "link":
+                url = str(media.get("url") or "").strip()
+                parsed = urlsplit(url)
+                if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+                    raise ValueError("Liên kết phải là URL http(s) hợp lệ")
+                result = client.sendLink(
+                    url,
+                    str(media.get("title") or url),
+                    thread_id,
+                    thread_type,
+                    thumbnailUrl=media.get("thumbnail_url"),
+                    domainUrl=parsed.netloc,
+                    desc=media.get("description"),
+                    message=Message(text=text_value) if text_value else None,
+                )
+            elif kind == "contact":
+                user_id = str(media.get("contact_user_id") or "").strip()
+                if not user_id:
+                    raise ValueError("Danh thiếp cần contact_user_id")
+                result = client.sendBusinessCard(
+                    user_id,
+                    str(media.get("contact_qr_url") or ""),
+                    thread_id,
+                    thread_type,
+                    phone=media.get("contact_phone"),
+                )
+            else:
+                raise ValueError(f"Rich media không được hỗ trợ: {kind or 'trống'}")
+            operation = {
+                "sticker": "Gửi sticker",
+                "gif": "Gửi GIF",
+                "link": "Gửi liên kết",
+                "contact": "Gửi danh thiếp",
+            }.get(kind, "Gửi nội dung")
+            result = ensure_zalo_success(result, operation)
+            self._record_success(session, account)
+            return {"kind": kind, "result": result}
+        except Exception as exc:
+            self._record_failure(session, account, exc)
+            raise
 
     def _prepare_video_upload(
         self,
