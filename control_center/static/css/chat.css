@@ -1430,8 +1430,11 @@ body[data-page="chat"] .page > .content {
 
 .zchat-automation-reactions {
   display: grid;
+  max-height: 210px;
   grid-template-columns: repeat(6, minmax(0, 1fr));
   gap: 6px;
+  overflow-y: auto;
+  padding-right: 3px;
 }
 
 .zchat-automation-reaction {

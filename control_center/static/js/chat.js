@@ -5172,13 +5172,16 @@
       const name = document.createElement("strong");
       name.textContent = item.label;
       const mode = document.createElement("small");
-      mode.textContent = item.mode === "native"
+      const compatibility = item.mode === "native"
         ? "Tương thích Zalo"
         : item.mode === "local"
           ? "Chỉ ZChat"
           : item.verified
             ? "Thử nghiệm · Đã xác minh"
             : "Thử nghiệm · Chưa xác minh";
+      mode.textContent = item.mode === "local"
+        ? compatibility
+        : `${compatibility} · ${item.zalo_icon} · type ${item.r_type}`;
       copy.append(name, mode);
       const quick = document.createElement("label");
       quick.className = "quick";
