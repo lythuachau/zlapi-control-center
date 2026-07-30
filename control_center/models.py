@@ -65,6 +65,30 @@ class ZaloAccount(Base, TimestampMixin):
     circuit_open_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
+class ZaloContactProfile(Base):
+    __tablename__ = "zalo_contact_profiles"
+
+    account_id: Mapped[str] = mapped_column(
+        ForeignKey("zalo_accounts.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    user_id: Mapped[str] = mapped_column(String(100), primary_key=True)
+    name: Mapped[str] = mapped_column(String(160))
+    avatar_url: Mapped[str | None] = mapped_column(Text, nullable=True)
+    phone: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    online: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    source: Mapped[str] = mapped_column(String(40), default="fetchUserInfo")
+    synced_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=utcnow,
+        index=True,
+    )
+
+    __table_args__ = (
+        Index("ix_zalo_contact_profiles_account_name", "account_id", "name"),
+    )
+
+
 class ApiKey(Base):
     __tablename__ = "api_keys"
 

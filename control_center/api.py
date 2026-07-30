@@ -59,8 +59,10 @@ from .models import (
     MediaUpload,
     User,
     ZaloAccount,
+    ZaloContactProfile,
     utcnow,
 )
+from .profiles import normalize_profiles, profile_records
 from .queue import cancel_job, enqueue_job, retry_job
 from .reactions import (
     reaction_by_id,
@@ -81,6 +83,7 @@ from .schemas import (
     ChatGroupRenameCreate,
     ChatMediaCreate,
     ChatMessageCreate,
+    ChatProfileSyncCreate,
     ChatReactionCreate,
     ChatReadStateUpdate,
     ChatRichMediaCreate,
@@ -204,97 +207,11 @@ def _contact_text(value: Any) -> str | None:
 
 
 def _contact_records(value: Any) -> list[tuple[str | None, dict]]:
-    if isinstance(value, list):
-        return [
-            (None, item)
-            for item in value
-            if isinstance(item, dict)
-        ]
-    if not isinstance(value, dict):
-        return []
-    for key in ("friends", "users", "items", "data", "results"):
-        nested = value.get(key)
-        if isinstance(nested, (list, dict)):
-            records = _contact_records(nested)
-            if records:
-                return records
-    identity_keys = {
-        "userId",
-        "user_id",
-        "uid",
-        "id",
-        "userID",
-        "zaloId",
-    }
-    if identity_keys.intersection(value):
-        return [(None, value)]
-    return [
-        (str(key), item)
-        for key, item in value.items()
-        if isinstance(item, dict)
-    ]
+    return profile_records(value)
 
 
 def _normalize_contacts(result: Any) -> list[dict]:
-    contacts: list[dict] = []
-    seen: set[str] = set()
-    for fallback_id, item in _contact_records(result):
-        user_id = next(
-            (
-                _contact_text(item.get(key))
-                for key in ("userId", "user_id", "uid", "id", "userID", "zaloId")
-                if _contact_text(item.get(key))
-            ),
-            None,
-        ) or fallback_id
-        if not user_id or user_id in seen:
-            continue
-        name = next(
-            (
-                _contact_text(item.get(key))
-                for key in (
-                    "displayName",
-                    "dName",
-                    "zaloName",
-                    "fullName",
-                    "name",
-                    "username",
-                )
-                if _contact_text(item.get(key))
-            ),
-            None,
-        ) or f"Zalo {user_id[-6:]}"
-        avatar_url = next(
-            (
-                _contact_text(item.get(key))
-                for key in ("avatar", "avatarUrl", "avt", "fullAvt", "avatar_url")
-                if _contact_text(item.get(key))
-            ),
-            None,
-        )
-        if avatar_url and not avatar_url.startswith(("https://", "http://")):
-            avatar_url = None
-        online = item.get("online")
-        if online is None:
-            online = item.get("isOnline")
-        if online is None:
-            online = item.get("isActive")
-        contacts.append(
-            {
-                "user_id": user_id,
-                "name": name,
-                "initials": "".join(
-                    part[0] for part in name.replace("-", " ").split() if part
-                )[:2].upper()
-                or "ZL",
-                "avatar_url": avatar_url,
-                "online": bool(online) if online is not None else None,
-                "phone": _contact_text(item.get("phoneNumber") or item.get("phone")),
-            }
-        )
-        seen.add(user_id)
-    contacts.sort(key=lambda item: item["name"].casefold())
-    return contacts
+    return normalize_profiles(result)
 
 
 def _contacts_job_payload(job: Job | None) -> dict | None:
@@ -1607,6 +1524,7 @@ def list_chat_conversations(
         conversation["avatar_url"] = (
             contact["avatar_url"] or conversation.get("avatar_url")
         )
+        conversation["profile_cached"] = True
     return conversations
 
 
@@ -2441,6 +2359,120 @@ def invite_chat_group_members(
         "status": job.status,
         "invited_user_ids": invite_ids,
         "skipped_existing": len(body.user_ids) - len(invite_ids),
+    }
+
+
+@router.post("/chat/profiles/sync", status_code=status.HTTP_202_ACCEPTED)
+def sync_chat_profiles(
+    body: ChatProfileSyncCreate,
+    request: Request,
+    session: Session = Depends(get_db),
+    principal: Principal = Depends(require_scope("jobs:create")),
+    _: None = Depends(verify_csrf),
+) -> dict:
+    account = _require_chat_account(session, body.account_id)
+    requested_ids = [
+        user_id
+        for user_id in body.user_ids
+        if user_id != account.zalo_uid
+    ]
+    cached_ids = set(
+        session.scalars(
+            select(ZaloContactProfile.user_id).where(
+                ZaloContactProfile.account_id == account.id,
+                ZaloContactProfile.user_id.in_(tuple(requested_ids)),
+            )
+        ).all()
+    ) if requested_ids else set()
+    missing_ids = [
+        user_id
+        for user_id in requested_ids
+        if user_id not in cached_ids
+    ]
+    if not missing_ids:
+        return {
+            "job_id": None,
+            "status": "succeeded",
+            "deduplicated": True,
+            "user_ids": requested_ids,
+        }
+
+    queued_job = session.scalar(
+        select(Job)
+        .where(
+            Job.account_id == account.id,
+            Job.action == "__chat_profiles__",
+            Job.status == "queued",
+        )
+        .order_by(desc(Job.created_at))
+        .limit(1)
+    )
+    if queued_job is not None:
+        existing_ids = {
+            str(value).strip()
+            for value in (queued_job.payload or {}).get("user_ids", [])
+            if str(value).strip()
+        }
+        merged_ids = list(dict.fromkeys([*existing_ids, *missing_ids]))[:100]
+        queued_job.payload = {"user_ids": merged_ids}
+        session.commit()
+        return {
+            "job_id": queued_job.id,
+            "status": queued_job.status,
+            "deduplicated": True,
+            "user_ids": merged_ids,
+        }
+
+    running_jobs = session.scalars(
+        select(Job)
+        .where(
+            Job.account_id == account.id,
+            Job.action == "__chat_profiles__",
+            Job.status == "running",
+        )
+        .order_by(desc(Job.created_at))
+        .limit(3)
+    ).all()
+    for running_job in running_jobs:
+        active_ids = {
+            str(value).strip()
+            for value in (running_job.payload or {}).get("user_ids", [])
+            if str(value).strip()
+        }
+        if set(missing_ids).issubset(active_ids):
+            return {
+                "job_id": running_job.id,
+                "status": running_job.status,
+                "deduplicated": True,
+                "user_ids": sorted(active_ids),
+            }
+
+    job = enqueue_job(
+        session,
+        account_id=account.id,
+        action="__chat_profiles__",
+        payload={"user_ids": missing_ids},
+        created_by_id=principal.id if principal.kind == "user" else None,
+        priority=65,
+        max_attempts=2,
+    )
+    write_audit(
+        session,
+        principal=principal,
+        action="chat.profiles.sync.enqueue",
+        resource_type="job",
+        resource_id=job.id,
+        details={
+            "account_id": account.id,
+            "profile_count": len(missing_ids),
+        },
+        request=request,
+    )
+    return {
+        "job_id": job.id,
+        "status": job.status,
+        "deduplicated": False,
+        "user_ids": missing_ids,
     }
 
 

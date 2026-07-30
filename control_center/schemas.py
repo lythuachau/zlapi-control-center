@@ -170,6 +170,27 @@ class ChatReadStateUpdate(BaseModel):
     thread_id: str = Field(min_length=1, max_length=100)
 
 
+class ChatProfileSyncCreate(BaseModel):
+    account_id: str
+    user_ids: list[str] = Field(min_length=1, max_length=100)
+
+    @field_validator("user_ids")
+    @classmethod
+    def unique_profile_ids(cls, value: list[str]) -> list[str]:
+        normalized: list[str] = []
+        seen: set[str] = set()
+        for item in value:
+            user_id = str(item).strip()
+            if not user_id or len(user_id) > 100:
+                raise ValueError("User ID is invalid")
+            if user_id not in seen:
+                normalized.append(user_id)
+                seen.add(user_id)
+        if not normalized:
+            raise ValueError("At least one user ID is required")
+        return normalized
+
+
 class ChatGroupRenameCreate(BaseModel):
     account_id: str
     current_name: str = Field(min_length=1, max_length=120)

@@ -10,6 +10,7 @@ from sqlalchemy import desc, or_, select
 from sqlalchemy.orm import Session
 
 from .models import ConversationRead, Event, Job, ZaloAccount
+from .profiles import cached_profiles
 from .reactions import reaction_catalog, reaction_presentation
 
 NON_MESSAGE_TYPES = {"chat.delete", "chat.reaction", "chat.undo"}
@@ -453,7 +454,14 @@ def thread_type(payload: dict) -> str:
     return "group" if "group" in value else "user"
 
 
+def is_own_author(author_id: str | None, account_uid: str | None) -> bool:
+    return bool(author_id and (author_id == "0" or author_id == account_uid))
+
+
 def sender_name(payload: dict, account_uid: str | None) -> str:
+    author_id = _text(payload.get("author_id"))
+    if is_own_author(author_id, account_uid):
+        return "Bạn"
     message_object = payload.get("message_object")
     name = _mapping_value(
         message_object,
@@ -475,11 +483,16 @@ def thread_name(payload: dict, thread_id: str, account_uid: str | None) -> str:
         if kind == "group"
         else ("dName", "displayName", "senderName", "name", "userName")
     )
-    name = _mapping_value(message_object, candidates)
+    author_id = _text(payload.get("author_id"))
+    name = (
+        None
+        if kind == "user" and is_own_author(author_id, account_uid)
+        else _mapping_value(message_object, candidates)
+    )
     if name:
         return name
     author_id = _text(payload.get("author_id"))
-    if kind == "user" and author_id and author_id != account_uid:
+    if kind == "user" and author_id and not is_own_author(author_id, account_uid):
         return f"Zalo {author_id[-6:]}"
     if kind == "group":
         return f"Nhóm Zalo • {thread_id[-6:]}"
@@ -518,7 +531,7 @@ def incoming_message(event: Event, account: ZaloAccount) -> dict:
         "reactions": [],
         "forwarded": bool(_message_object(payload).get("reference")),
         "undone": False,
-        "mine": bool(account.zalo_uid and author_id == account.zalo_uid),
+        "mine": is_own_author(author_id, account.zalo_uid),
         "status": "received",
         "created_at": event.created_at.isoformat(),
     }
@@ -643,6 +656,7 @@ def conversation_payloads(
     latest_event_ids: dict[str, int] = {}
     listener_ids_by_thread: dict[str, set[str]] = {}
     unread: dict[str, dict[str, int]] = {}
+    counterpart_names: dict[str, str] = {}
     items: list[tuple[object, dict]] = []
     for event in events:
         thread_id = event.thread_id
@@ -660,6 +674,11 @@ def conversation_payloads(
         message = incoming_message(event, account)
         if message["thread_id"]:
             items.append((event.created_at, message))
+            if (
+                message["thread_type"] == "user"
+                and not message["mine"]
+            ):
+                counterpart_names.setdefault(thread_id, message["author_name"])
             if user_id and not message["mine"] and event.id > read_cursors.get(thread_id, 0):
                 summary = unread.setdefault(
                     thread_id,
@@ -675,6 +694,7 @@ def conversation_payloads(
         ):
             items.append((job.created_at, message))
     items.sort(key=lambda item: item[0], reverse=True)
+    profile_cache = cached_profiles(session, account_id=account.id)
 
     conversations: dict[str, dict] = {}
     for _, message in items:
@@ -683,17 +703,13 @@ def conversation_payloads(
             continue
         metadata = groups.get(thread_id, {})
         kind = "group" if metadata or message["thread_type"] == "group" else "user"
-        name = _text(metadata.get("name")) if kind == "group" else message["thread_name"]
-        if message["mine"]:
-            matching_event = next(
-                (event for event in events if event.thread_id == thread_id),
-                None,
-            )
-            if matching_event:
-                event_name = thread_name(
-                    matching_event.payload or {}, thread_id, account.zalo_uid
-                )
-                name = name or event_name
+        profile = profile_cache.get(thread_id) if kind == "user" else None
+        name = (
+            _text(metadata.get("name"))
+            if kind == "group"
+            else _text(profile.name if profile else None)
+            or counterpart_names.get(thread_id)
+        )
         name = name or (
             f"Nhóm Zalo • {thread_id[-6:]}" if kind == "group" else f"Zalo {thread_id[-6:]}"
         )
@@ -702,7 +718,12 @@ def conversation_payloads(
             "thread_type": kind,
             "name": name,
             "initials": initials(name),
-            "avatar_url": _text(metadata.get("avatar_url")),
+            "avatar_url": (
+                _text(metadata.get("avatar_url"))
+                if kind == "group"
+                else _text(profile.avatar_url if profile else None)
+            ),
+            "profile_cached": bool(profile) if kind == "user" else True,
             "member_count": metadata.get("member_count") if kind == "group" else None,
             "preview": message["text"],
             "preview_author_name": message["author_name"],
@@ -784,6 +805,23 @@ def message_payloads(
         incoming_message(event, account)
         for event in projectable_events
     ]
+    author_ids = {
+        str(message["author_id"])
+        for message in messages
+        if message.get("author_id")
+    }
+    profile_cache = cached_profiles(
+        session,
+        account_id=account.id,
+        user_ids=author_ids,
+    )
+    for message in messages:
+        profile = profile_cache.get(str(message.get("author_id") or ""))
+        message["author_avatar_url"] = (
+            _text(profile.avatar_url) if profile else None
+        )
+        if profile and not message["mine"]:
+            message["author_name"] = profile.name
     listener_message_ids: set[str] = set()
     for event in events:
         if is_projectable_message(event.payload or {}):

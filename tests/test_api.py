@@ -16,6 +16,7 @@ from control_center.models import (
     Job,
     User,
     ZaloAccount,
+    ZaloContactProfile,
     utcnow,
 )
 
@@ -921,6 +922,124 @@ def test_chat_contacts_reads_friend_cache_and_deduplicates_sync_jobs(client: Tes
     assert deduplicated.status_code == 202
     assert deduplicated.json()["deduplicated"] is True
     assert deduplicated.json()["job_id"] == queued.json()["job_id"]
+
+
+def test_chat_profiles_correct_outgoing_identity_and_enrich_messages(client: TestClient):
+    csrf = login(client)
+    account_id = client.post(
+        "/api/v1/accounts",
+        headers={"X-CSRF-Token": csrf},
+        json={
+            "name": "Profile account",
+            "imei": "imei-profile-12345",
+            "cookies": {"zpw_sek": "profile-secret"},
+            "listener_enabled": True,
+        },
+    ).json()["id"]
+    with client.app.state.database.session_factory() as session:
+        account = session.get(ZaloAccount, account_id)
+        account.status = "online"
+        account.zalo_uid = "self-uid"
+        session.add(
+            Event(
+                account_id=account_id,
+                event_type="message.received",
+                thread_id="stranger-9001",
+                payload={
+                    "message_id": "outgoing-echo-1",
+                    "author_id": "0",
+                    "message": "Tin nhắn gửi đi",
+                    "message_object": {
+                        "uidFrom": "0",
+                        "dName": "Tên của chính tôi",
+                    },
+                    "thread_type": "USER",
+                },
+            )
+        )
+        session.commit()
+
+    before = client.get(
+        "/api/v1/chat/conversations",
+        params={"account_id": account_id},
+    )
+    assert before.status_code == 200
+    conversation = before.json()[0]
+    assert conversation["name"] == "Zalo r-9001"
+    assert conversation["name"] != "Tên của chính tôi"
+    assert conversation["avatar_url"] is None
+    assert conversation["profile_cached"] is False
+    before_messages = client.get(
+        "/api/v1/chat/messages",
+        params={"account_id": account_id, "thread_id": "stranger-9001"},
+    )
+    assert before_messages.status_code == 200
+    assert before_messages.json()[0]["mine"] is True
+    assert before_messages.json()[0]["author_name"] == "Bạn"
+
+    sync = client.post(
+        "/api/v1/chat/profiles/sync",
+        headers={"X-CSRF-Token": csrf},
+        json={
+            "account_id": account_id,
+            "user_ids": ["stranger-9001", "stranger-9001", "self-uid"],
+        },
+    )
+    assert sync.status_code == 202
+    assert sync.json()["user_ids"] == ["stranger-9001"]
+    with client.app.state.database.session_factory() as session:
+        job = session.get(Job, sync.json()["job_id"])
+        assert job.action == "__chat_profiles__"
+        assert job.payload == {"user_ids": ["stranger-9001"]}
+        session.add(
+            ZaloContactProfile(
+                account_id=account_id,
+                user_id="stranger-9001",
+                name="Người trò chuyện thật",
+                avatar_url="https://s120-26-ava-talk.zadn.vn/profile.jpg",
+                source="fetchUserInfo",
+            )
+        )
+        session.add(
+            Event(
+                account_id=account_id,
+                event_type="message.received",
+                thread_id="stranger-9001",
+                payload={
+                    "message_id": "incoming-2",
+                    "author_id": "stranger-9001",
+                    "message": "Tin nhắn nhận được",
+                    "message_object": {
+                        "uidFrom": "stranger-9001",
+                        "dName": "Tên từ sự kiện cũ",
+                    },
+                    "thread_type": "USER",
+                },
+            )
+        )
+        session.commit()
+
+    after = client.get(
+        "/api/v1/chat/conversations",
+        params={"account_id": account_id},
+    )
+    assert after.status_code == 200
+    conversation = after.json()[0]
+    assert conversation["name"] == "Người trò chuyện thật"
+    assert conversation["avatar_url"].endswith("/profile.jpg")
+    assert conversation["profile_cached"] is True
+
+    messages = client.get(
+        "/api/v1/chat/messages",
+        params={"account_id": account_id, "thread_id": "stranger-9001"},
+    )
+    assert messages.status_code == 200
+    incoming = next(
+        item for item in messages.json()
+        if item["author_id"] == "stranger-9001"
+    )
+    assert incoming["author_name"] == "Người trò chuyện thật"
+    assert incoming["author_avatar_url"].endswith("/profile.jpg")
 
 
 def test_chat_message_actions_and_custom_reaction_catalog(client: TestClient):

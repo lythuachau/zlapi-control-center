@@ -67,7 +67,8 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
             "Content-Security-Policy",
             "default-src 'self'; script-src 'self'; style-src 'self'; "
             "img-src 'self' data: https://*.zadn.vn https://*.zdn.vn https://*.dlfl.vn "
-            "https://*.dlmd.me; media-src 'self' https://*.zadn.vn https://*.zdn.vn "
+            "https://*.dlmd.me https://zalo.me https://*.zalo.me; "
+            "media-src 'self' https://*.zadn.vn https://*.zdn.vn "
             "https://*.dlfl.vn https://*.dlmd.me; connect-src 'self'; object-src 'none'; "
             "base-uri 'self'; frame-ancestors 'none'; form-action 'self'",
         )

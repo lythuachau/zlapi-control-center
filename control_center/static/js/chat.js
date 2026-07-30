@@ -19,6 +19,7 @@
     contactsSearch: "",
     contactsPollTimer: null,
     contactsRequestId: 0,
+    profileSyncKeys: new Set(),
     tasks: [],
     tasksFilter: "all",
     tasksPollTimer: null,
@@ -2025,6 +2026,7 @@
       state.conversations = await api(
         `/api/v1/chat/conversations?account_id=${encodeURIComponent(state.accountId)}&limit=150`,
       );
+      void syncMissingProfiles(state.conversations);
       if (state.activeThread) {
         const refreshed = state.conversations.find(
           (item) => item.thread_id === state.activeThread.thread_id,
@@ -2064,6 +2066,30 @@
       renderConversations();
     } finally {
       conversationList.removeAttribute("aria-busy");
+    }
+  }
+
+  async function syncMissingProfiles(conversations) {
+    if (!state.accountId || !accountIsReady()) return;
+    const userIds = [...new Set(
+      (Array.isArray(conversations) ? conversations : [])
+        .filter((item) => item.thread_type === "user" && !item.profile_cached)
+        .map((item) => String(item.thread_id || "").trim())
+        .filter((userId) => userId && !state.profileSyncKeys.has(userId)),
+    )].slice(0, 100);
+    if (!userIds.length) return;
+    userIds.forEach((userId) => state.profileSyncKeys.add(userId));
+    try {
+      await api("/api/v1/chat/profiles/sync", {
+        method: "POST",
+        body: JSON.stringify({
+          account_id: state.accountId,
+          user_ids: userIds,
+        }),
+      });
+    } catch (error) {
+      userIds.forEach((userId) => state.profileSyncKeys.delete(userId));
+      console.warn("Không thể đồng bộ hồ sơ Zalo", error);
     }
   }
 
@@ -2410,6 +2436,7 @@
         thread_type: "user",
         name: message.author_name || state.activeThread?.name,
         initials: initials(message.author_name || state.activeThread?.name),
+        avatar_url: message.author_avatar_url || null,
       });
       row.append(avatar);
     }
@@ -4112,6 +4139,7 @@
     window.clearTimeout(state.contactsPollTimer);
     window.clearTimeout(state.tasksPollTimer);
     state.contacts = [];
+    state.profileSyncKeys.clear();
     state.contactsSearch = "";
     state.stickerCatalog = [];
     state.stickerRecentKeys.clear();
@@ -4852,12 +4880,21 @@
         window.clearTimeout(state.contactsPollTimer);
         void loadContacts();
       }
+      if (action === "__chat_profiles__") {
+        const result = envelope.payload?.result || {};
+        for (const profile of result.profiles || []) {
+          if (profile?.user_id) state.profileSyncKeys.add(String(profile.user_id));
+        }
+        scheduleConversationReload();
+        if (state.activeThread) scheduleMessageReload(state.activeThread.thread_id);
+      }
       if (
         action === "__chat_group_info__" &&
         state.activeThread?.thread_type === "group"
       ) {
         window.clearTimeout(state.groupInfoPollTimer);
         void loadGroupInfo({ autoSync: false });
+        scheduleMessageReload(state.activeThread.thread_id);
       }
       if (
         action === "__chat_group_pins__" &&

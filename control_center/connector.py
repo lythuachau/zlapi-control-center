@@ -18,6 +18,7 @@ from .catalog import ActionSpec, get_action
 from .config import Settings
 from .media import gif_library_media_url, outbound_media_url, validate_media_kind
 from .models import GifLibraryItem, MediaUpload, ZaloAccount, utcnow
+from .profiles import cache_profiles
 from .security import SecretBox, is_expired, safe_child_path
 from .video import VideoMetadata, generate_video_thumbnail, probe_video
 
@@ -633,13 +634,21 @@ class ZaloConnector:
         try:
             client = self.client_for(account)
             result = getattr(client, spec.callable_method)(**arguments)
+            serialized = jsonable(result)
+            if action == "fetchAllFriends":
+                cache_profiles(
+                    session,
+                    account_id=account.id,
+                    result=serialized,
+                    source="fetchAllFriends",
+                )
             account.status = "online"
             account.last_seen_at = utcnow()
             account.last_error = None
             account.circuit_failures = 0
             account.circuit_open_until = None
             session.commit()
-            return jsonable(result)
+            return serialized
         except Exception as exc:
             self._record_failure(session, account, exc)
             raise
@@ -788,8 +797,68 @@ class ZaloConnector:
                 },
                 "members": members,
             }
+            cache_profiles(
+                session,
+                account_id=account.id,
+                result=members,
+                source="fetchGroupInfo",
+                requested_user_ids=member_ids,
+            )
             self._record_success(session, account)
             return result
+        except Exception as exc:
+            self._record_failure(session, account, exc)
+            raise
+
+    def fetch_chat_profiles(
+        self,
+        session: Session,
+        account: ZaloAccount,
+        payload: dict,
+    ) -> dict:
+        if not account.enabled:
+            raise RuntimeError("Zalo account is disabled")
+        if account.circuit_open_until and not is_expired(account.circuit_open_until):
+            raise CircuitOpenError(
+                f"Circuit is open until {account.circuit_open_until.isoformat()}"
+            )
+        user_ids: list[str] = []
+        seen: set[str] = set()
+        for value in payload.get("user_ids") or []:
+            user_id = _snapshot_text(value)
+            if (
+                user_id
+                and user_id != account.zalo_uid
+                and user_id not in seen
+                and len(user_id) <= 100
+            ):
+                user_ids.append(user_id)
+                seen.add(user_id)
+        if not user_ids:
+            raise ValueError("Profile sync requires at least one user ID")
+        if len(user_ids) > 100:
+            raise ValueError("Profile sync is limited to 100 users")
+
+        _limiter(account.id).wait()
+        try:
+            client = self.client_for(account)
+            response = ensure_zalo_success(
+                client.fetchUserInfo(user_ids),
+                "fetchUserInfo",
+            )
+            profiles = cache_profiles(
+                session,
+                account_id=account.id,
+                result=response,
+                source="fetchUserInfo",
+                requested_user_ids=user_ids,
+            )
+            self._record_success(session, account)
+            return {
+                "requested_user_ids": user_ids,
+                "profiles": profiles,
+                "count": len(profiles),
+            }
         except Exception as exc:
             self._record_failure(session, account, exc)
             raise

@@ -111,6 +111,12 @@ class Worker:
                         account,
                         job.payload,
                     )
+                elif action == "__chat_profiles__":
+                    result = self.connector.fetch_chat_profiles(
+                        session,
+                        account,
+                        job.payload,
+                    )
                 elif action == "__chat_group_pins__":
                     result = self.connector.fetch_chat_group_pins(
                         session,
