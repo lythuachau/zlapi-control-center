@@ -63,6 +63,7 @@ from .models import (
     utcnow,
 )
 from .profiles import (
+    backfill_friend_profiles,
     cached_profiles,
     normalize_profiles,
     profile_initials,
@@ -1579,6 +1580,12 @@ def list_chat_contacts(
         .order_by(desc(Job.finished_at), desc(Job.created_at))
         .limit(1)
     )
+    if latest_success and backfill_friend_profiles(
+        session,
+        account_id=account_id,
+        result=latest_success.result,
+    ):
+        session.commit()
     contacts = _normalize_contacts(latest_success.result if latest_success else None)
     profile_cache = cached_profiles(
         session,
@@ -1613,6 +1620,34 @@ def get_chat_friend_relationship(
     if not user_id or len(user_id) > 100:
         raise HTTPException(status_code=422, detail="User ID is invalid")
     profile = session.get(ZaloContactProfile, (account_id, user_id))
+    if profile is None:
+        latest_success = session.scalar(
+            select(Job)
+            .where(
+                Job.account_id == account_id,
+                Job.action == "fetchAllFriends",
+                Job.status == "succeeded",
+            )
+            .order_by(desc(Job.finished_at), desc(Job.created_at))
+            .limit(1)
+        )
+        contact = next(
+            (
+                item
+                for item in _normalize_contacts(
+                    latest_success.result if latest_success else None
+                )
+                if item["user_id"] == user_id
+            ),
+            None,
+        )
+        if contact:
+            contact["relationship_status"] = "friend"
+            contact["blocked_by_me"] = False
+            contact["synced_at"] = (
+                latest_success.finished_at if latest_success else None
+            )
+            return contact
     return _contact_profile_payload(profile, user_id)
 
 

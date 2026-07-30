@@ -877,6 +877,20 @@ def test_chat_contacts_reads_friend_cache_and_deduplicates_sync_jobs(client: Tes
     assert friend_two["blocked_by_me"] is False
     assert payload["job"]["status"] == "succeeded"
 
+    friend_detail = client.get(
+        "/api/v1/chat/friends/friend-2",
+        params={"account_id": account_id},
+    )
+    assert friend_detail.status_code == 200
+    assert friend_detail.json()["relationship_status"] == "friend"
+    with client.app.state.database.session_factory() as session:
+        cached_friend = session.get(
+            ZaloContactProfile,
+            (account_id, "friend-2"),
+        )
+        assert cached_friend is not None
+        assert cached_friend.relationship_status == "friend"
+
     conversations_before_chat = client.get(
         "/api/v1/chat/conversations",
         params={"account_id": account_id},

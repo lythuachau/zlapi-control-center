@@ -5,7 +5,11 @@ import pytest
 from control_center.connector import ZaloConnector, ZaloResponseError
 from control_center.db import Database
 from control_center.models import ZaloAccount, ZaloContactProfile
-from control_center.profiles import apply_relationship_action, normalize_profiles
+from control_center.profiles import (
+    apply_relationship_action,
+    backfill_friend_profiles,
+    normalize_profiles,
+)
 
 
 class FakeProfileClient:
@@ -164,6 +168,83 @@ def test_apply_relationship_action_updates_cached_profile(settings):
         )
         assert profile.relationship_status == "unknown"
         assert profile.blocked_by_me is False
+    database.dispose()
+
+
+def test_backfill_friend_profiles_preserves_action_state(settings):
+    settings.ensure_directories()
+    database = Database(settings)
+    database.create_schema()
+    with database.session_factory() as session:
+        account = ZaloAccount(
+            name="Friend backfill account",
+            cookie_cipher="unused",
+            imei_cipher="unused",
+        )
+        session.add(account)
+        session.commit()
+        account_id = account.id
+        session.add_all(
+            [
+                ZaloContactProfile(
+                    account_id=account_id,
+                    user_id="unknown-profile",
+                    name="Zalo rofile",
+                    relationship_status="unknown",
+                    source="fetchUserInfo",
+                ),
+                ZaloContactProfile(
+                    account_id=account_id,
+                    user_id="blocked-profile",
+                    name="Blocked profile",
+                    relationship_status="blocked",
+                    blocked_by_me=True,
+                    source="blockUser",
+                ),
+                ZaloContactProfile(
+                    account_id=account_id,
+                    user_id="unblocked-profile",
+                    name="Unblocked profile",
+                    relationship_status="unknown",
+                    source="unblockUser",
+                ),
+            ]
+        )
+        session.commit()
+
+        changed = backfill_friend_profiles(
+            session,
+            account_id=account_id,
+            result=[
+                {"userId": "new-friend", "displayName": "New Friend"},
+                {"userId": "unknown-profile", "displayName": "Known Friend"},
+                {"userId": "blocked-profile", "displayName": "Blocked profile"},
+                {"userId": "unblocked-profile", "displayName": "Unblocked profile"},
+            ],
+        )
+        session.commit()
+
+        assert changed == 2
+        assert session.get(
+            ZaloContactProfile,
+            (account_id, "new-friend"),
+        ).relationship_status == "friend"
+        assert session.get(
+            ZaloContactProfile,
+            (account_id, "unknown-profile"),
+        ).relationship_status == "friend"
+        blocked = session.get(
+            ZaloContactProfile,
+            (account_id, "blocked-profile"),
+        )
+        assert blocked.relationship_status == "blocked"
+        assert blocked.blocked_by_me is True
+        unblocked = session.get(
+            ZaloContactProfile,
+            (account_id, "unblocked-profile"),
+        )
+        assert unblocked.relationship_status == "unknown"
+        assert unblocked.source == "unblockUser"
     database.dispose()
 
 

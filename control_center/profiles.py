@@ -33,6 +33,12 @@ AVATAR_KEYS = (
     "fullAvt",
     "avatar_url",
 )
+RELATIONSHIP_ACTION_SOURCES = {
+    "sendFriendRequest",
+    "acceptFriendRequest",
+    "blockUser",
+    "unblockUser",
+}
 
 
 def profile_bool(value: Any) -> bool | None:
@@ -299,6 +305,65 @@ def cached_profiles(
         item.user_id: item
         for item in session.scalars(statement).all()
     }
+
+
+def backfill_friend_profiles(
+    session: Session,
+    *,
+    account_id: str,
+    result: Any,
+) -> int:
+    """Backfill legacy friend jobs without replacing newer relationship actions."""
+    normalized = normalize_profiles(result)
+    if not normalized:
+        return 0
+    existing = cached_profiles(
+        session,
+        account_id=account_id,
+        user_ids={item["user_id"] for item in normalized},
+    )
+    missing = [item for item in normalized if item["user_id"] not in existing]
+    changed = 0
+    if missing:
+        cache_profiles(
+            session,
+            account_id=account_id,
+            result=missing,
+            source="fetchAllFriends",
+        )
+        changed += len(missing)
+
+    synced_at = utcnow()
+    for item in normalized:
+        row = existing.get(item["user_id"])
+        if row is None:
+            continue
+        row_changed = False
+        if not row.name or row.name.startswith("Zalo "):
+            row.name = item["name"]
+            row_changed = True
+        if not row.avatar_url and item["avatar_url"]:
+            row.avatar_url = item["avatar_url"]
+            row_changed = True
+        if not row.phone and item["phone"]:
+            row.phone = item["phone"]
+            row_changed = True
+        if row.online is None and item["online"] is not None:
+            row.online = item["online"]
+            row_changed = True
+        if (
+            row.relationship_status == "unknown"
+            and row.source not in RELATIONSHIP_ACTION_SOURCES
+        ):
+            row.relationship_status = "friend"
+            row.blocked_by_me = False
+            row.source = "fetchAllFriends"
+            row_changed = True
+        if row_changed:
+            row.synced_at = synced_at
+            changed += 1
+    session.flush()
+    return changed
 
 
 def apply_relationship_action(
