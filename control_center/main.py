@@ -32,6 +32,7 @@ from .models import (
     Archive,
     AuditLog,
     Event,
+    GifLibraryItem,
     Job,
     MediaUpload,
     User,
@@ -219,6 +220,43 @@ def create_app(
             content_disposition_type="inline",
             headers={
                 "Cache-Control": "private, max-age=300",
+                "X-Content-Type-Options": "nosniff",
+            },
+        )
+        if request.method == "HEAD":
+            response.headers.setdefault("Accept-Ranges", "bytes")
+        return response
+
+    @app.api_route(
+        "/media/gif-library/{gif_id}",
+        methods=["GET", "HEAD"],
+        include_in_schema=False,
+    )
+    def gif_library_media(
+        gif_id: str,
+        expires: int,
+        signature: str,
+        request: Request,
+        session: Session = Depends(get_db),
+    ) -> FileResponse:
+        if not verify_outbound_signature(settings, gif_id, expires, signature):
+            raise HTTPException(
+                status_code=403,
+                detail="Liên kết GIF không hợp lệ hoặc đã hết hạn",
+            )
+        item = session.get(GifLibraryItem, gif_id)
+        if item is None:
+            raise HTTPException(status_code=404, detail="GIF không còn tồn tại")
+        path = Path(item.stored_path)
+        if not safe_child_path(settings.gif_library_dir, path) or not path.is_file():
+            raise HTTPException(status_code=404, detail="GIF không còn tồn tại")
+        response = FileResponse(
+            path,
+            media_type=item.content_type or "image/gif",
+            filename=item.original_name,
+            content_disposition_type="inline",
+            headers={
+                "Cache-Control": "private, max-age=3600",
                 "X-Content-Type-Options": "nosniff",
             },
         )
@@ -434,6 +472,7 @@ def create_app(
                 "super_admin",
             },
             can_manage_reactions=context["user"].role in {"admin", "super_admin"},
+            can_manage_gif_library=context["user"].role in {"admin", "super_admin"},
             can_manage_groups=context["user"].role in {"admin", "super_admin"},
             max_upload_mb=settings.max_upload_mb,
         )

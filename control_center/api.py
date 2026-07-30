@@ -4,6 +4,7 @@ import asyncio
 import hashlib
 import json
 import secrets
+import shutil
 from datetime import timedelta
 from pathlib import Path
 from typing import Any
@@ -37,6 +38,7 @@ from .chat import (
     outgoing_message,
 )
 from .media import (
+    gif_library_media_url,
     infer_media_kind,
     outbound_media_url,
     safe_upload_name,
@@ -50,6 +52,7 @@ from .models import (
     AuditLog,
     ConversationRead,
     Event,
+    GifLibraryItem,
     Job,
     MediaUpload,
     User,
@@ -69,6 +72,8 @@ from .schemas import (
     ActionInvoke,
     ApiKeyCreate,
     ChatForwardCreate,
+    ChatGifLibraryDelete,
+    ChatGifLibraryUpdate,
     ChatGroupInviteCreate,
     ChatGroupRenameCreate,
     ChatMediaCreate,
@@ -90,6 +95,7 @@ from .security import (
     generate_api_key,
     hash_secret,
     is_expired,
+    safe_child_path,
     verify_secret,
 )
 
@@ -458,6 +464,120 @@ def _chat_sticker_catalog(
         "recent_count": len(recent),
         "source": "Lịch sử Listener và sticker đã gửi từ ZChat",
     }
+
+
+def _gif_library_item_payload(item: GifLibraryItem, settings: Any) -> dict:
+    return {
+        "id": item.id,
+        "name": item.original_name,
+        "size_bytes": item.size_bytes,
+        "content_type": item.content_type,
+        "width": item.width,
+        "height": item.height,
+        "sha256": item.sha256,
+        "favorite": item.favorite,
+        "use_count": item.use_count,
+        "created_by_id": item.created_by_id,
+        "created_at": item.created_at,
+        "updated_at": item.updated_at,
+        "last_used_at": item.last_used_at,
+        "preview_url": gif_library_media_url(settings, item.id),
+    }
+
+
+def _gif_library_usage(session: Session) -> tuple[int, int]:
+    count, size = session.execute(
+        select(
+            func.count(GifLibraryItem.id),
+            func.coalesce(func.sum(GifLibraryItem.size_bytes), 0),
+        )
+    ).one()
+    return int(count or 0), int(size or 0)
+
+
+def _gif_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as source:
+        while chunk := source.read(1024 * 1024):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _persist_gif_upload(
+    session: Session,
+    *,
+    upload: MediaUpload,
+    settings: Any,
+    created_by_id: str | None,
+    width: int | None,
+    height: int | None,
+) -> tuple[GifLibraryItem, bool]:
+    source = Path(upload.stored_path)
+    if not safe_child_path(settings.upload_dir, source) or not source.is_file():
+        raise HTTPException(status_code=422, detail="Tệp GIF tạm không còn tồn tại")
+    with source.open("rb") as stream:
+        signature = stream.read(6)
+    if signature not in {b"GIF87a", b"GIF89a"}:
+        raise HTTPException(status_code=422, detail="Tệp không có chữ ký GIF hợp lệ")
+    digest = _gif_sha256(source)
+    existing = session.scalar(
+        select(GifLibraryItem).where(GifLibraryItem.sha256 == digest)
+    )
+    if existing is not None:
+        if existing.width is None and width:
+            existing.width = width
+        if existing.height is None and height:
+            existing.height = height
+        existing.last_used_at = utcnow()
+        existing.use_count += 1
+        return existing, False
+
+    used_items, used_bytes = _gif_library_usage(session)
+    if used_items >= settings.gif_library_max_items:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"Thư viện đã đạt giới hạn {settings.gif_library_max_items} GIF. "
+                "Hãy xóa GIF cũ hoặc bỏ chọn lưu vào thư viện."
+            ),
+        )
+    if used_bytes + upload.size_bytes > settings.gif_library_max_bytes:
+        raise HTTPException(
+            status_code=409,
+            detail="Thư viện GIF đã hết dung lượng. Hãy xóa GIF cũ hoặc bỏ chọn lưu.",
+        )
+
+    settings.gif_library_dir.mkdir(parents=True, exist_ok=True)
+    target = settings.gif_library_dir / f"{digest}.gif"
+    if not target.exists():
+        shutil.copy2(source, target)
+    item = GifLibraryItem(
+        sha256=digest,
+        original_name=safe_upload_name(upload.original_name),
+        stored_path=str(target),
+        size_bytes=upload.size_bytes,
+        content_type="image/gif",
+        width=width,
+        height=height,
+        favorite=False,
+        use_count=1,
+        created_by_id=created_by_id,
+        last_used_at=utcnow(),
+    )
+    session.add(item)
+    try:
+        session.flush()
+    except IntegrityError:
+        session.rollback()
+        existing = session.scalar(
+            select(GifLibraryItem).where(GifLibraryItem.sha256 == digest)
+        )
+        if existing is None:
+            raise
+        existing.last_used_at = utcnow()
+        existing.use_count += 1
+        return existing, False
+    return item, True
 
 
 def _group_info_job_payload(job: Job | None) -> dict | None:
@@ -1489,6 +1609,121 @@ def update_chat_sticker_preferences(
     )
 
 
+@router.get("/chat/gifs")
+def list_chat_gifs(
+    request: Request,
+    session: Session = Depends(get_db),
+    _: Principal = Depends(require_scope("read")),
+) -> dict:
+    settings = request.app.state.settings
+    items = session.scalars(
+        select(GifLibraryItem)
+        .order_by(
+            desc(GifLibraryItem.favorite),
+            desc(GifLibraryItem.last_used_at),
+            desc(GifLibraryItem.created_at),
+        )
+        .limit(settings.gif_library_max_items)
+    ).all()
+    used_items, used_bytes = _gif_library_usage(session)
+    return {
+        "items": [
+            _gif_library_item_payload(item, settings)
+            for item in items
+        ],
+        "favorite_count": sum(1 for item in items if item.favorite),
+        "quota": {
+            "used_items": used_items,
+            "max_items": settings.gif_library_max_items,
+            "used_bytes": used_bytes,
+            "max_bytes": settings.gif_library_max_bytes,
+        },
+        "shared": True,
+    }
+
+
+@router.put("/chat/gifs/{gif_id}")
+def update_chat_gif(
+    gif_id: str,
+    body: ChatGifLibraryUpdate,
+    request: Request,
+    session: Session = Depends(get_db),
+    principal: Principal = Depends(require_scope("jobs:create")),
+    _: None = Depends(verify_csrf),
+) -> dict:
+    item = session.get(GifLibraryItem, gif_id)
+    if item is None:
+        raise HTTPException(status_code=404, detail="Không tìm thấy GIF trong thư viện")
+    item.favorite = body.favorite
+    item.updated_at = utcnow()
+    session.commit()
+    write_audit(
+        session,
+        principal=principal,
+        action="chat.gif_library.favorite",
+        resource_type="gif_library_item",
+        resource_id=item.id,
+        details={
+            "name": item.original_name,
+            "favorite": item.favorite,
+        },
+        request=request,
+    )
+    return _gif_library_item_payload(item, request.app.state.settings)
+
+
+@router.delete("/chat/gifs/{gif_id}")
+def delete_chat_gif(
+    gif_id: str,
+    body: ChatGifLibraryDelete,
+    request: Request,
+    session: Session = Depends(get_db),
+    principal: Principal = Depends(require_scope("accounts:write")),
+    _: None = Depends(verify_csrf),
+) -> dict:
+    item = session.get(GifLibraryItem, gif_id)
+    if item is None:
+        raise HTTPException(status_code=404, detail="Không tìm thấy GIF trong thư viện")
+    if body.confirmation != item.original_name:
+        raise HTTPException(
+            status_code=422,
+            detail="Tên GIF xác nhận không khớp",
+        )
+    active_jobs = session.scalars(
+        select(Job).where(
+            Job.action == "__chat_rich_media__",
+            Job.status.in_(("queued", "running")),
+        )
+    ).all()
+    if any(
+        str(((job.payload or {}).get("media") or {}).get("library_gif_id") or "")
+        == item.id
+        for job in active_jobs
+    ):
+        raise HTTPException(
+            status_code=409,
+            detail="GIF đang được một job sử dụng; hãy chờ job hoàn tất rồi xóa",
+        )
+    path = Path(item.stored_path)
+    item_id = item.id
+    item_name = item.original_name
+    item_size = item.size_bytes
+    session.delete(item)
+    session.commit()
+    if safe_child_path(request.app.state.settings.gif_library_dir, path):
+        path.unlink(missing_ok=True)
+    write_audit(
+        session,
+        principal=principal,
+        action="chat.gif_library.delete",
+        resource_type="gif_library_item",
+        resource_id=item_id,
+        details={"name": item_name, "size_bytes": item_size},
+        request=request,
+    )
+    return {"deleted": True, "id": item_id, "name": item_name}
+
+
 @router.get("/chat/groups/{thread_id}")
 def get_chat_group_info(
     thread_id: str,
@@ -2382,6 +2617,7 @@ def send_chat_rich_media(
 ) -> dict:
     account = _require_chat_account(session, body.account_id)
     media: dict[str, Any] = {"kind": body.kind}
+    created_library_gif: GifLibraryItem | None = None
     if body.kind == "sticker":
         try:
             sticker_id = str(int(body.sticker_id or "0"))
@@ -2402,27 +2638,99 @@ def send_chat_rich_media(
             }
         )
     elif body.kind == "gif":
-        upload_id = (body.upload_token or "").removeprefix("upload:")
-        upload = session.get(MediaUpload, upload_id) if upload_id else None
-        if upload is None or is_expired(upload.expires_at):
-            raise HTTPException(status_code=422, detail="Hãy chọn tệp GIF hợp lệ trước khi gửi")
-        if principal.kind == "user" and upload.created_by_id != principal.id:
-            raise HTTPException(status_code=403, detail="Không được dùng upload của người khác")
-        if infer_media_kind(upload.original_name, upload.content_type) != "gif":
-            raise HTTPException(status_code=422, detail="Tệp được chọn không phải GIF")
-        media.update(
-            {
-                "upload_token": body.upload_token,
-                "filename": safe_upload_name(upload.original_name),
-                "size": upload.size_bytes,
-                "content_type": upload.content_type,
-                "url": outbound_media_url(request.app.state.settings, upload.id),
-                "thumbnail_url": body.thumbnail_url
-                or outbound_media_url(request.app.state.settings, upload.id),
-                "width": body.width or 500,
-                "height": body.height or 500,
-            }
-        )
+        if body.gif_library_id and body.upload_token:
+            raise HTTPException(
+                status_code=422,
+                detail="Chỉ được chọn một GIF trong thư viện hoặc một tệp tải lên",
+            )
+        settings = request.app.state.settings
+        if body.gif_library_id:
+            library_gif = session.get(GifLibraryItem, body.gif_library_id)
+            if library_gif is None:
+                raise HTTPException(
+                    status_code=404,
+                    detail="GIF đã chọn không còn trong thư viện",
+                )
+            path = Path(library_gif.stored_path)
+            if not safe_child_path(settings.gif_library_dir, path) or not path.is_file():
+                raise HTTPException(
+                    status_code=404,
+                    detail="Tệp GIF trong thư viện không còn tồn tại",
+                )
+            library_gif.use_count += 1
+            library_gif.last_used_at = utcnow()
+            media.update(
+                {
+                    "library_gif_id": library_gif.id,
+                    "filename": library_gif.original_name,
+                    "size": library_gif.size_bytes,
+                    "content_type": library_gif.content_type,
+                    "url": gif_library_media_url(settings, library_gif.id),
+                    "thumbnail_url": gif_library_media_url(settings, library_gif.id),
+                    "width": body.width or library_gif.width or 500,
+                    "height": body.height or library_gif.height or 500,
+                }
+            )
+        else:
+            upload_id = (body.upload_token or "").removeprefix("upload:")
+            upload = session.get(MediaUpload, upload_id) if upload_id else None
+            if upload is None or is_expired(upload.expires_at):
+                raise HTTPException(
+                    status_code=422,
+                    detail="Hãy chọn tệp GIF hợp lệ trước khi gửi",
+                )
+            if principal.kind == "user" and upload.created_by_id != principal.id:
+                raise HTTPException(
+                    status_code=403,
+                    detail="Không được dùng upload của người khác",
+                )
+            if principal.kind != "user" and upload.created_by_id is not None:
+                raise HTTPException(
+                    status_code=403,
+                    detail="Upload không thuộc API key này",
+                )
+            if infer_media_kind(upload.original_name, upload.content_type) != "gif":
+                raise HTTPException(
+                    status_code=422,
+                    detail="Tệp được chọn không phải GIF",
+                )
+            if body.save_to_library:
+                library_gif, was_created = _persist_gif_upload(
+                    session,
+                    upload=upload,
+                    settings=settings,
+                    created_by_id=principal.id if principal.kind == "user" else None,
+                    width=body.width,
+                    height=body.height,
+                )
+                if was_created:
+                    created_library_gif = library_gif
+                media.update(
+                    {
+                        "library_gif_id": library_gif.id,
+                        "filename": library_gif.original_name,
+                        "size": library_gif.size_bytes,
+                        "content_type": library_gif.content_type,
+                        "url": gif_library_media_url(settings, library_gif.id),
+                        "thumbnail_url": gif_library_media_url(settings, library_gif.id),
+                        "width": body.width or library_gif.width or 500,
+                        "height": body.height or library_gif.height or 500,
+                    }
+                )
+            else:
+                media.update(
+                    {
+                        "upload_token": body.upload_token,
+                        "filename": safe_upload_name(upload.original_name),
+                        "size": upload.size_bytes,
+                        "content_type": upload.content_type,
+                        "url": outbound_media_url(settings, upload.id),
+                        "thumbnail_url": body.thumbnail_url
+                        or outbound_media_url(settings, upload.id),
+                        "width": body.width or 500,
+                        "height": body.height or 500,
+                    }
+                )
     elif body.kind == "link":
         parsed = urlsplit(body.url or "")
         if parsed.scheme not in {"http", "https"} or not parsed.netloc:
@@ -2465,6 +2773,20 @@ def send_chat_rich_media(
         priority=45,
         max_attempts=1,
     )
+    if created_library_gif is not None:
+        write_audit(
+            session,
+            principal=principal,
+            action="chat.gif_library.create",
+            resource_type="gif_library_item",
+            resource_id=created_library_gif.id,
+            details={
+                "name": created_library_gif.original_name,
+                "size_bytes": created_library_gif.size_bytes,
+                "sha256": created_library_gif.sha256,
+            },
+            request=request,
+        )
     write_audit(
         session,
         principal=principal,
@@ -2476,6 +2798,8 @@ def send_chat_rich_media(
             "thread_id": body.thread_id,
             "thread_type": body.thread_type,
             "kind": body.kind,
+            "gif_library_id": media.get("library_gif_id"),
+            "save_to_library": body.save_to_library if body.kind == "gif" else None,
         },
         request=request,
     )

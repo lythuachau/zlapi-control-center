@@ -87,6 +87,12 @@
     stickerFilter: "all",
     stickerSearch: "",
     stickerRequestId: 0,
+    gifLibrary: [],
+    gifFilter: "all",
+    gifSearch: "",
+    gifRequestId: 0,
+    gifQuota: null,
+    canManageGifLibrary: app.dataset.canManageGifLibrary === "true",
     richContactSearch: "",
     lastMessageScrollTop: 0,
   };
@@ -179,6 +185,10 @@
   const stickerGrid = $("#chat-sticker-grid");
   const stickerSearch = $("#chat-sticker-search");
   const stickerStatus = $("#chat-sticker-status");
+  const gifGrid = $("#chat-gif-grid");
+  const gifSearch = $("#chat-gif-search");
+  const gifStatus = $("#chat-gif-status");
+  const gifSaveLibrary = $("#chat-gif-save-library");
   const richContactSearch = $("#chat-rich-contact-search");
   const richContactList = $("#chat-rich-contact-list");
   const gifInput = $("#chat-gif-input");
@@ -650,12 +660,20 @@
       richPreviewMeta.textContent = "Sẵn sàng · Gửi bằng sendSticker";
     } else if (item.kind === "gif") {
       const image = document.createElement("img");
-      image.src = item.objectUrl;
-      image.alt = item.file.name;
+      image.src = item.objectUrl || item.preview_url;
+      image.alt = item.file?.name || item.name || "GIF";
       richPreviewMedia.append(image);
-      richPreviewTitle.textContent = item.file.name;
-      richPreviewCopy.textContent = "GIF sẽ được tải lên an toàn rồi gửi qua Zalo.";
-      richPreviewMeta.textContent = `${formatBytes(item.file.size)} · ${item.width || "?"}×${item.height || "?"}`;
+      richPreviewTitle.textContent = item.file?.name || item.name || "GIF";
+      richPreviewCopy.textContent = item.libraryId
+        ? "GIF đã lưu trong thư viện và có thể dùng lại mà không cần tải lên."
+        : gifSaveLibrary?.checked
+          ? "GIF sẽ được gửi và lưu vào thư viện dùng chung."
+          : "GIF chỉ được tải lên tạm thời cho lần gửi này.";
+      richPreviewMeta.textContent = (
+        `${formatBytes(item.file?.size || item.size_bytes || 0)} · ` +
+        `${item.width || "?"}×${item.height || "?"}` +
+        `${item.use_count ? ` · ${item.use_count} lần dùng` : ""}`
+      );
     } else if (item.kind === "link") {
       if (item.thumbnail_url) {
         const image = document.createElement("img");
@@ -720,13 +738,17 @@
     setRichStatus(
       {
         sticker: "Chọn một sticker để xem trước.",
-        gif: "Chọn tệp GIF từ máy.",
+        gif: "Chọn GIF trong thư viện hoặc thêm tệp mới từ máy.",
         link: "Nhập URL để tạo thẻ liên kết.",
         contact: "Chọn một người trong danh bạ.",
         audio: "Chọn tệp âm thanh để nghe thử.",
       }[tab],
     );
     if (tab === "contact") renderRichContacts();
+    if (tab === "gif") {
+      renderGifLibrary();
+      if (!state.gifLibrary.length) void loadGifLibrary();
+    }
   }
 
   function stickerKey(item) {
@@ -940,6 +962,200 @@
     selectSticker(sticker);
   }
 
+  function normalizedGif(item) {
+    const id = text(item?.id);
+    const previewUrl = text(item?.preview_url);
+    if (!id || !previewUrl) return null;
+    return {
+      id,
+      name: text(item.name) || "animation.gif",
+      size_bytes: Math.max(Number(item.size_bytes) || 0, 0),
+      width: Number(item.width) || null,
+      height: Number(item.height) || null,
+      preview_url: previewUrl,
+      favorite: Boolean(item.favorite),
+      use_count: Math.max(Number(item.use_count) || 0, 0),
+      created_at: item.created_at || null,
+      last_used_at: item.last_used_at || null,
+    };
+  }
+
+  function visibleGifs() {
+    const term = state.gifSearch.toLocaleLowerCase("vi");
+    return state.gifLibrary.filter((item, index) => {
+      if (state.gifFilter === "favorite" && !item.favorite) return false;
+      if (state.gifFilter === "recent" && index >= 24) return false;
+      return !term || `${item.name} ${item.id}`.toLocaleLowerCase("vi").includes(term);
+    });
+  }
+
+  function selectGifLibraryItem(item) {
+    setRichDraft({
+      kind: "gif",
+      label: item.name,
+      libraryId: item.id,
+      name: item.name,
+      size_bytes: item.size_bytes,
+      width: item.width,
+      height: item.height,
+      preview_url: item.preview_url,
+      objectUrl: item.preview_url,
+      use_count: item.use_count,
+    });
+    if (gifSaveLibrary) {
+      gifSaveLibrary.checked = true;
+      gifSaveLibrary.disabled = true;
+    }
+    renderGifLibrary();
+  }
+
+  function renderGifLibrary() {
+    if (!gifGrid) return;
+    $$("[data-gif-filter]").forEach((button) => {
+      button.classList.toggle("active", button.dataset.gifFilter === state.gifFilter);
+    });
+    const items = visibleGifs();
+    if (!items.length) {
+      const empty = document.createElement("div");
+      empty.className = "zchat-dialog-empty";
+      empty.textContent = state.gifLibrary.length
+        ? "Không có GIF phù hợp với bộ lọc."
+        : "Thư viện chưa có GIF. Hãy chọn một tệp bên dưới và gửi lần đầu.";
+      gifGrid.replaceChildren(empty);
+    } else {
+      gifGrid.replaceChildren(...items.map((item) => {
+        const card = document.createElement("div");
+        card.className = `zchat-gif-item${
+          state.richDraft?.kind === "gif" && state.richDraft.libraryId === item.id
+            ? " selected"
+            : ""
+        }`;
+        card.role = "button";
+        card.tabIndex = 0;
+        card.setAttribute("aria-label", `Xem trước GIF ${item.name}`);
+
+        const image = document.createElement("img");
+        image.src = item.preview_url;
+        image.alt = "";
+        image.loading = "lazy";
+        const copy = document.createElement("span");
+        copy.className = "zchat-gif-item-copy";
+        const name = document.createElement("strong");
+        name.textContent = item.name;
+        const meta = document.createElement("small");
+        meta.textContent = `${formatBytes(item.size_bytes)} · ${item.use_count} lần dùng`;
+        copy.append(name, meta);
+
+        const actions = document.createElement("span");
+        actions.className = "zchat-gif-item-actions";
+        const favorite = document.createElement("button");
+        favorite.type = "button";
+        favorite.className = `favorite${item.favorite ? " active" : ""}`;
+        favorite.textContent = item.favorite ? "★" : "☆";
+        favorite.title = item.favorite ? "Bỏ khỏi yêu thích" : "Thêm vào yêu thích";
+        favorite.setAttribute(
+          "aria-label",
+          `${item.favorite ? "Bỏ khỏi" : "Thêm vào"} yêu thích: ${item.name}`,
+        );
+        favorite.addEventListener("click", (event) => {
+          event.stopPropagation();
+          void toggleGifFavorite(item);
+        });
+        actions.append(favorite);
+
+        if (state.canManageGifLibrary) {
+          const remove = document.createElement("button");
+          remove.type = "button";
+          remove.className = "delete";
+          remove.textContent = "×";
+          remove.title = "Xóa khỏi thư viện";
+          remove.setAttribute("aria-label", `Xóa GIF ${item.name}`);
+          remove.addEventListener("click", (event) => {
+            event.stopPropagation();
+            void deleteGifLibraryItem(item);
+          });
+          actions.append(remove);
+        }
+
+        card.append(image, copy, actions);
+        card.addEventListener("click", () => selectGifLibraryItem(item));
+        card.addEventListener("keydown", (event) => {
+          if (event.key !== "Enter" && event.key !== " ") return;
+          event.preventDefault();
+          selectGifLibraryItem(item);
+        });
+        return card;
+      }));
+    }
+
+    if (gifStatus) {
+      const quota = state.gifQuota;
+      gifStatus.textContent = quota
+        ? (
+          `${quota.used_items}/${quota.max_items} GIF · ` +
+          `${formatBytes(quota.used_bytes)}/${formatBytes(quota.max_bytes)} · ` +
+          `${state.gifLibrary.filter((item) => item.favorite).length} yêu thích`
+        )
+        : "Thư viện GIF dùng chung cho mọi tài khoản Zalo.";
+    }
+  }
+
+  async function loadGifLibrary() {
+    const requestId = ++state.gifRequestId;
+    if (gifStatus) gifStatus.textContent = "Đang tải thư viện GIF…";
+    try {
+      const result = await api("/api/v1/chat/gifs");
+      if (requestId !== state.gifRequestId) return;
+      state.gifLibrary = (Array.isArray(result?.items) ? result.items : [])
+        .map(normalizedGif)
+        .filter(Boolean);
+      state.gifQuota = result?.quota || null;
+      renderGifLibrary();
+    } catch (error) {
+      if (requestId !== state.gifRequestId) return;
+      if (gifStatus) gifStatus.textContent = error.message;
+      toast(`Không thể tải thư viện GIF: ${error.message}`, "error");
+    }
+  }
+
+  async function toggleGifFavorite(item) {
+    const previous = item.favorite;
+    item.favorite = !previous;
+    renderGifLibrary();
+    try {
+      const result = await api(`/api/v1/chat/gifs/${encodeURIComponent(item.id)}`, {
+        method: "PUT",
+        body: JSON.stringify({ favorite: item.favorite }),
+      });
+      const updated = normalizedGif(result);
+      if (updated) Object.assign(item, updated);
+      renderGifLibrary();
+      toast(previous ? "Đã bỏ GIF khỏi yêu thích." : "Đã thêm GIF vào yêu thích.");
+    } catch (error) {
+      item.favorite = previous;
+      renderGifLibrary();
+      toast(error.message, "error");
+    }
+  }
+
+  async function deleteGifLibraryItem(item) {
+    if (!state.canManageGifLibrary) return;
+    if (!window.confirm(`Xóa GIF “${item.name}” khỏi thư viện dùng chung?`)) return;
+    try {
+      await api(`/api/v1/chat/gifs/${encodeURIComponent(item.id)}`, {
+        method: "DELETE",
+        body: JSON.stringify({ confirmation: item.name }),
+      });
+      if (state.richDraft?.kind === "gif" && state.richDraft.libraryId === item.id) {
+        clearRichDraft();
+      }
+      toast("Đã xóa GIF khỏi thư viện.");
+      await loadGifLibrary();
+    } catch (error) {
+      toast(error.message, "error");
+    }
+  }
+
   function renderRichContacts() {
     if (!richContactList) return;
     const term = state.richContactSearch.toLocaleLowerCase("vi");
@@ -1061,7 +1277,11 @@
       uploaded: null,
       xhr: null,
     };
+    if (kind === "gif" && gifSaveLibrary) {
+      gifSaveLibrary.disabled = false;
+    }
     setRichDraft(item);
+    if (kind === "gif") renderGifLibrary();
     const media = kind === "gif" ? new Image() : document.createElement("audio");
     const readyEvent = kind === "gif" ? "load" : "loadedmetadata";
     media.addEventListener(readyEvent, () => {
@@ -1145,42 +1365,48 @@
     updateComposer();
     try {
       let result;
-      if (item.kind === "gif" || item.kind === "audio") {
+      if (item.kind === "gif") {
+        setRichStatus("Đang xếp hàng gửi qua Zalo…");
+        const body = {
+          account_id: state.accountId,
+          thread_id: target.thread_id,
+          thread_type: target.thread_type,
+          kind: "gif",
+          width: item.width,
+          height: item.height,
+        };
+        if (item.libraryId) {
+          body.gif_library_id = item.libraryId;
+        } else {
+          const uploaded = await uploadRichFile(item);
+          body.upload_token = uploaded.token;
+          body.thumbnail_url = uploaded.preview_url;
+          body.save_to_library = gifSaveLibrary?.checked !== false;
+        }
+        result = await api("/api/v1/chat/rich-media", {
+          method: "POST",
+          body: JSON.stringify(body),
+        });
+      } else if (item.kind === "audio") {
         const uploaded = await uploadRichFile(item);
         setRichStatus("Đang xếp hàng gửi qua Zalo…");
-        if (item.kind === "gif") {
-          result = await api("/api/v1/chat/rich-media", {
-            method: "POST",
-            body: JSON.stringify({
-              account_id: state.accountId,
-              thread_id: target.thread_id,
-              thread_type: target.thread_type,
-              kind: "gif",
+        result = await api("/api/v1/chat/media", {
+          method: "POST",
+          body: JSON.stringify({
+            account_id: state.accountId,
+            thread_id: target.thread_id,
+            thread_type: target.thread_type,
+            text: "",
+            items: [{
               upload_token: uploaded.token,
-              thumbnail_url: uploaded.preview_url,
-              width: item.width,
-              height: item.height,
-            }),
-          });
-        } else {
-          result = await api("/api/v1/chat/media", {
-            method: "POST",
-            body: JSON.stringify({
-              account_id: state.accountId,
-              thread_id: target.thread_id,
-              thread_type: target.thread_type,
-              text: "",
-              items: [{
-                upload_token: uploaded.token,
-                kind: "audio",
-                name: uploaded.name || item.file.name,
-                content_type: uploaded.content_type || item.file.type || null,
-                size_bytes: uploaded.size_bytes || item.file.size,
-                duration_ms: item.durationMs,
-              }],
-            }),
-          });
-        }
+              kind: "audio",
+              name: uploaded.name || item.file.name,
+              content_type: uploaded.content_type || item.file.type || null,
+              size_bytes: uploaded.size_bytes || item.file.size,
+              duration_ms: item.durationMs,
+            }],
+          }),
+        });
       } else {
         const body = {
           account_id: state.accountId,
@@ -1226,6 +1452,8 @@
       scheduleConversationReload();
       if (sentKind === "sticker") {
         window.setTimeout(() => void loadStickerCatalog(), 250);
+      } else if (sentKind === "gif") {
+        window.setTimeout(() => void loadGifLibrary(), 250);
       }
     } catch (error) {
       setRichStatus(error.message, "error");
@@ -1251,14 +1479,22 @@
     clearRichDraft();
     state.stickerFilter = "all";
     state.stickerSearch = "";
+    state.gifFilter = "all";
+    state.gifSearch = "";
     state.richContactSearch = "";
     if (stickerSearch) stickerSearch.value = "";
+    if (gifSearch) gifSearch.value = "";
+    if (gifSaveLibrary) {
+      gifSaveLibrary.checked = true;
+      gifSaveLibrary.disabled = false;
+    }
     if (richContactSearch) richContactSearch.value = "";
     switchRichTab("sticker");
     renderStickerCatalog();
     renderRichContacts();
     dialogOpen(richMediaDialog);
     void loadStickerCatalog();
+    void loadGifLibrary();
     if (!state.contacts.length) void loadContacts();
   }
 
@@ -4939,6 +5175,24 @@
   stickerSearch?.addEventListener("input", (event) => {
     state.stickerSearch = event.target.value;
     renderStickerCatalog();
+  });
+  $$("[data-gif-filter]").forEach((button) => {
+    button.addEventListener("click", () => {
+      state.gifFilter = button.dataset.gifFilter;
+      $$("[data-gif-filter]").forEach((item) => {
+        item.classList.toggle("active", item === button);
+      });
+      renderGifLibrary();
+    });
+  });
+  gifSearch?.addEventListener("input", (event) => {
+    state.gifSearch = event.target.value;
+    renderGifLibrary();
+  });
+  gifSaveLibrary?.addEventListener("change", () => {
+    if (state.richDraft?.kind === "gif" && !state.richDraft.libraryId) {
+      renderRichPreview();
+    }
   });
   $("#chat-sticker-use-manual")?.addEventListener("click", useManualSticker);
   $("#chat-gif-select button")?.addEventListener("click", () => gifInput?.click());

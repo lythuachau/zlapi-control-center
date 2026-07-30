@@ -16,8 +16,8 @@ from zlapi import Message, MessageObject, ThreadType, ZaloAPI
 
 from .catalog import ActionSpec, get_action
 from .config import Settings
-from .media import outbound_media_url, validate_media_kind
-from .models import MediaUpload, ZaloAccount, utcnow
+from .media import gif_library_media_url, outbound_media_url, validate_media_kind
+from .models import GifLibraryItem, MediaUpload, ZaloAccount, utcnow
 from .security import SecretBox, is_expired, safe_child_path
 from .video import VideoMetadata, generate_video_thumbnail, probe_video
 
@@ -1269,18 +1269,40 @@ class ZaloConnector:
                     thread_type,
                 )
             elif kind == "gif":
-                upload, path = self._resolve_upload_record(
-                    session,
-                    str(media.get("upload_token") or ""),
-                )
-                if upload.original_name.lower().rsplit(".", 1)[-1] != "gif":
-                    raise ValueError("GIF cần tệp .gif hợp lệ")
+                library_id = str(media.get("library_gif_id") or "")
+                if library_id:
+                    library_gif = session.get(GifLibraryItem, library_id)
+                    if library_gif is None:
+                        raise ValueError("GIF không còn trong thư viện")
+                    path = Path(library_gif.stored_path)
+                    if (
+                        not safe_child_path(self.settings.gif_library_dir, path)
+                        or not path.is_file()
+                    ):
+                        raise ValueError("Tệp GIF trong thư viện không còn tồn tại")
+                    thumbnail_url = str(
+                        media.get("thumbnail_url")
+                        or gif_library_media_url(self.settings, library_gif.id)
+                    )
+                    gif_name = Path(library_gif.original_name).name or "sticker.gif"
+                else:
+                    upload, path = self._resolve_upload_record(
+                        session,
+                        str(media.get("upload_token") or ""),
+                    )
+                    if upload.original_name.lower().rsplit(".", 1)[-1] != "gif":
+                        raise ValueError("GIF cần tệp .gif hợp lệ")
+                    thumbnail_url = str(
+                        media.get("thumbnail_url")
+                        or outbound_media_url(self.settings, upload.id)
+                    )
+                    gif_name = Path(upload.original_name).name or "sticker.gif"
                 result = client.sendLocalGif(
                     str(path),
-                    str(media.get("thumbnail_url") or outbound_media_url(self.settings, upload.id)),
+                    thumbnail_url,
                     thread_id,
                     thread_type,
-                    gifName=Path(upload.original_name).name or "sticker.gif",
+                    gifName=gif_name,
                     width=int(media.get("width") or 500),
                     height=int(media.get("height") or 500),
                 )

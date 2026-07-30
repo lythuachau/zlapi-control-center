@@ -3580,6 +3580,17 @@ button.zchat-poll-card {
   margin: 0;
 }
 
+.zchat-gif-toolbar {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 10px;
+}
+
+.zchat-gif-toolbar .zchat-dialog-search {
+  margin: 0;
+}
+
 .zchat-sticker-filters {
   display: flex;
   gap: 4px;
@@ -3652,6 +3663,139 @@ button.zchat-poll-card {
 .zchat-sticker-favorite.active {
   border-color: color-mix(in srgb, #f6b94a 70%, var(--line));
   color: #f6b94a;
+}
+
+.zchat-gif-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(132px, 1fr));
+  align-content: start;
+  gap: 9px;
+  min-height: 182px;
+  max-height: 292px;
+  margin-top: 12px;
+  overflow-y: auto;
+}
+
+.zchat-gif-item {
+  position: relative;
+  display: grid;
+  min-width: 0;
+  grid-template-rows: 112px auto;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: 15px;
+  padding: 0;
+  background: var(--muted-panel);
+  color: var(--ink);
+  text-align: left;
+  transition: border-color 150ms ease, transform 150ms ease, background 150ms ease;
+}
+
+.zchat-gif-item:hover,
+.zchat-gif-item.selected {
+  border-color: color-mix(in srgb, var(--accent) 78%, var(--line));
+  background: color-mix(in srgb, var(--accent) 10%, var(--muted-panel));
+  transform: translateY(-2px);
+}
+
+.zchat-gif-item > img {
+  display: block;
+  width: 100%;
+  height: 112px;
+  background:
+    linear-gradient(135deg, color-mix(in srgb, var(--accent) 8%, var(--panel)), var(--panel));
+  object-fit: contain;
+}
+
+.zchat-gif-item-copy {
+  display: grid;
+  min-width: 0;
+  gap: 3px;
+  padding: 8px 9px;
+}
+
+.zchat-gif-item-copy strong,
+.zchat-gif-item-copy small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.zchat-gif-item-copy strong {
+  font-size: 8px;
+}
+
+.zchat-gif-item-copy small {
+  color: var(--muted);
+  font-size: 6px;
+}
+
+.zchat-gif-item-actions {
+  position: absolute;
+  z-index: 2;
+  top: 6px;
+  right: 6px;
+  display: flex;
+  gap: 4px;
+}
+
+.zchat-gif-item-actions button {
+  display: grid;
+  width: 25px;
+  height: 25px;
+  place-items: center;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  padding: 0;
+  background: color-mix(in srgb, var(--raised) 92%, transparent);
+  color: var(--muted);
+  font-family: "Segoe UI Emoji", "Apple Color Emoji", sans-serif;
+  font-size: 11px;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.18);
+}
+
+.zchat-gif-item-actions button.favorite.active {
+  border-color: color-mix(in srgb, #f6b94a 70%, var(--line));
+  color: #f6b94a;
+}
+
+.zchat-gif-item-actions button.delete {
+  color: #fb7185;
+}
+
+.zchat-gif-save-option {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  margin-top: 10px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  padding: 9px 11px;
+  background: color-mix(in srgb, var(--panel) 92%, var(--accent));
+}
+
+.zchat-gif-save-option input {
+  width: 16px;
+  height: 16px;
+  accent-color: var(--accent);
+}
+
+.zchat-gif-save-option span,
+.zchat-gif-save-option strong,
+.zchat-gif-save-option small {
+  display: block;
+}
+
+.zchat-gif-save-option strong {
+  color: var(--ink);
+  font-size: 8px;
+}
+
+.zchat-gif-save-option small {
+  margin-top: 2px;
+  color: var(--muted);
+  font-size: 7px;
+  line-height: 1.4;
 }
 
 .zchat-rich-help {
@@ -3733,7 +3877,7 @@ button.zchat-poll-card {
   text-align: center;
 }
 
-.zchat-rich-upload-zone > span {
+.zchat-rich-upload-zone > span:first-child {
   display: grid;
   width: 64px;
   height: 64px;
@@ -3761,6 +3905,32 @@ button.zchat-poll-card {
   border-color: transparent;
   background: var(--accent);
   color: var(--accent-ink);
+}
+
+.zchat-rich-upload-zone.compact {
+  min-height: 0;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  justify-items: start;
+  gap: 10px;
+  margin-top: 12px;
+  padding: 12px;
+  text-align: left;
+}
+
+.zchat-rich-upload-zone.compact > span:first-child {
+  width: 44px;
+  height: 44px;
+  border-radius: 13px;
+  font-size: 11px;
+}
+
+.zchat-rich-upload-zone.compact > span:nth-child(2) {
+  display: grid;
+  gap: 3px;
+}
+
+.zchat-rich-upload-zone.compact button {
+  margin-top: 0;
 }
 
 .zchat-rich-form {
@@ -4119,6 +4289,26 @@ button.zchat-poll-card {
 
   .zchat-attachment-list {
     grid-template-columns: 1fr;
+  }
+}
+
+@media (max-width: 540px) {
+  .zchat-gif-toolbar,
+  .zchat-sticker-toolbar {
+    grid-template-columns: 1fr;
+  }
+
+  .zchat-gif-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .zchat-rich-upload-zone.compact {
+    grid-template-columns: auto minmax(0, 1fr);
+  }
+
+  .zchat-rich-upload-zone.compact button {
+    grid-column: 1 / -1;
+    justify-self: stretch;
   }
 }
 

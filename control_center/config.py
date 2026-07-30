@@ -28,6 +28,12 @@ class Settings(BaseSettings):
     auto_create_schema: bool = True
     database_cap_bytes: int = 1_073_741_824
     max_upload_mb: int = Field(default=25, ge=1, le=250)
+    gif_library_max_items: int = Field(default=200, ge=1, le=5000)
+    gif_library_max_bytes: int = Field(
+        default=2_147_483_648,
+        ge=10 * 1024 * 1024,
+        le=100 * 1024 * 1024 * 1024,
+    )
     archive_after_days: int = Field(default=90, ge=7)
     pg_dump_path: str = "pg_dump"
     rclone_remote: str = ""
@@ -65,6 +71,10 @@ class Settings(BaseSettings):
         return self.data_dir / "uploads"
 
     @property
+    def gif_library_dir(self) -> Path:
+        return self.data_dir / "media" / "gif-library"
+
+    @property
     def archive_dir(self) -> Path:
         return self.data_dir / "archive"
 
@@ -93,6 +103,7 @@ class Settings(BaseSettings):
         for directory in (
             self.data_dir,
             self.upload_dir,
+            self.gif_library_dir,
             self.archive_dir,
             self.backup_dir,
             self.secret_dir,

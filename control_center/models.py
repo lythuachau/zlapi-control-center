@@ -205,6 +205,40 @@ class MediaUpload(Base):
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
 
 
+class GifLibraryItem(Base):
+    __tablename__ = "gif_library_items"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    sha256: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    original_name: Mapped[str] = mapped_column(String(255))
+    stored_path: Mapped[str] = mapped_column(Text, unique=True)
+    size_bytes: Mapped[int] = mapped_column(Integer)
+    content_type: Mapped[str] = mapped_column(String(120), default="image/gif")
+    width: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    height: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    favorite: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
+    use_count: Mapped[int] = mapped_column(Integer, default=0)
+    created_by_id: Mapped[str | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=utcnow,
+        index=True,
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=utcnow,
+        onupdate=utcnow,
+    )
+    last_used_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+        index=True,
+    )
+
+
 class AppSetting(Base):
     __tablename__ = "app_settings"
 

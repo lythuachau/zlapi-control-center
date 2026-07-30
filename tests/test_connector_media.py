@@ -8,7 +8,7 @@ from sqlalchemy import func, select
 
 from control_center.connector import ZaloConnector, ZaloResponseError
 from control_center.db import Database
-from control_center.models import MediaUpload, ZaloAccount, utcnow
+from control_center.models import GifLibraryItem, MediaUpload, ZaloAccount, utcnow
 from control_center.video import VideoMetadata
 
 
@@ -179,8 +179,10 @@ def test_connector_sends_rich_media_and_audio(settings):
     database = Database(settings)
     database.create_schema()
     gif_path = settings.upload_dir / "reaction.gif"
+    library_gif_path = settings.gif_library_dir / "saved.gif"
     audio_path = settings.upload_dir / "voice.mp3"
     gif_path.write_bytes(b"gif-fixture")
+    library_gif_path.write_bytes(b"saved-gif-fixture")
     audio_path.write_bytes(b"audio-fixture")
     client = FakeMediaClient()
     connector = ZaloConnector(settings, object())
@@ -204,6 +206,16 @@ def test_connector_sends_rich_media_and_audio(settings):
                     size_bytes=gif_path.stat().st_size,
                     content_type="image/gif",
                     expires_at=utcnow() + timedelta(days=1),
+                ),
+                GifLibraryItem(
+                    id="saved-gif-id",
+                    sha256="1" * 64,
+                    original_name="saved.gif",
+                    stored_path=str(library_gif_path),
+                    size_bytes=library_gif_path.stat().st_size,
+                    content_type="image/gif",
+                    width=480,
+                    height=320,
                 ),
                 MediaUpload(
                     id="f" * 32,
@@ -243,6 +255,20 @@ def test_connector_sends_rich_media_and_audio(settings):
                     "thumbnail_url": "https://zlapi.example.test/reaction.gif",
                     "width": 320,
                     "height": 240,
+                },
+            },
+        )
+        library_gif = connector.send_chat_rich_media(
+            session,
+            account,
+            {
+                "thread_id": "destination",
+                "thread_type": "user",
+                "kind": "gif",
+                "media": {
+                    "library_gif_id": "saved-gif-id",
+                    "width": 480,
+                    "height": 320,
                 },
             },
         )
@@ -290,8 +316,9 @@ def test_connector_sends_rich_media_and_audio(settings):
             },
         )
 
-    assert [sticker["kind"], gif["kind"], link["kind"], contact["kind"]] == [
+    assert [sticker["kind"], gif["kind"], library_gif["kind"], link["kind"], contact["kind"]] == [
         "sticker",
+        "gif",
         "gif",
         "link",
         "contact",
@@ -300,15 +327,18 @@ def test_connector_sends_rich_media_and_audio(settings):
     assert [call[0] for call in client.calls] == [
         "sticker",
         "gif",
+        "gif",
         "link",
         "contact",
         "audio",
     ]
     assert client.calls[0][1:4] == (3, 43521, 11786)
     assert client.calls[1][5]["width"] == 320
-    assert client.calls[2][5]["message"].text == "Đọc thêm"
-    assert client.calls[3][1] == "friend-123"
-    assert client.calls[4][1].startswith(
+    assert client.calls[2][1] == str(library_gif_path)
+    assert "/media/gif-library/saved-gif-id" in client.calls[2][2]
+    assert client.calls[3][5]["message"].text == "Đọc thêm"
+    assert client.calls[4][1] == "friend-123"
+    assert client.calls[5][1].startswith(
         f"http://zlapi.example.test/media/outbound/{'f' * 32}"
     )
     database.dispose()

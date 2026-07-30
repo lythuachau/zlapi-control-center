@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+from pathlib import Path
 from types import SimpleNamespace
 
 from fastapi.testclient import TestClient
@@ -8,7 +9,15 @@ from sqlalchemy import event as sqlalchemy_event
 from sqlalchemy import select
 
 from control_center.auth import require_short_lived_scope
-from control_center.models import AuditLog, Event, Job, User, ZaloAccount, utcnow
+from control_center.models import (
+    AuditLog,
+    Event,
+    GifLibraryItem,
+    Job,
+    User,
+    ZaloAccount,
+    utcnow,
+)
 
 from .conftest import login
 
@@ -1952,6 +1961,51 @@ def test_chat_rich_media_catalog_favorites_and_queue(client: TestClient):
     )
     assert gif.status_code == 202
     assert gif.json()["message"]["kind"] == "gif"
+    library = client.get("/api/v1/chat/gifs")
+    assert library.status_code == 200
+    assert library.json()["quota"]["used_items"] == 1
+    assert library.json()["items"][0]["name"] == "wave.gif"
+    assert library.json()["items"][0]["use_count"] == 1
+    assert client.get(library.json()["items"][0]["preview_url"]).content == b"GIF89a-rich"
+    gif_library_id = library.json()["items"][0]["id"]
+
+    duplicate_upload = client.post(
+        "/api/v1/uploads",
+        headers={"X-CSRF-Token": csrf},
+        files={"file": ("wave-copy.gif", b"GIF89a-rich", "image/gif")},
+    )
+    duplicate = client.post(
+        "/api/v1/chat/rich-media",
+        headers={"X-CSRF-Token": csrf},
+        json={
+            "account_id": account_id,
+            "thread_id": "rich-destination",
+            "thread_type": "user",
+            "kind": "gif",
+            "upload_token": duplicate_upload.json()["token"],
+            "save_to_library": True,
+        },
+    )
+    assert duplicate.status_code == 202
+    deduplicated_library = client.get("/api/v1/chat/gifs").json()
+    assert deduplicated_library["quota"]["used_items"] == 1
+    assert deduplicated_library["items"][0]["use_count"] == 2
+
+    favorite_gif = client.put(
+        f"/api/v1/chat/gifs/{gif_library_id}",
+        headers={"X-CSRF-Token": csrf},
+        json={"favorite": True},
+    )
+    assert favorite_gif.status_code == 200
+    assert favorite_gif.json()["favorite"] is True
+
+    blocked_delete = client.request(
+        "DELETE",
+        f"/api/v1/chat/gifs/{gif_library_id}",
+        headers={"X-CSRF-Token": csrf},
+        json={"confirmation": "wave.gif"},
+    )
+    assert blocked_delete.status_code == 409
 
     audio_upload = client.post(
         "/api/v1/uploads",
@@ -2001,9 +2055,40 @@ def test_chat_rich_media_catalog_favorites_and_queue(client: TestClient):
             "contact",
             "gif",
         }
+        gif_jobs = [job for job in jobs if job.payload["kind"] == "gif"]
+        assert len(gif_jobs) == 2
+        assert {
+            job.payload["media"]["library_gif_id"]
+            for job in gif_jobs
+        } == {gif_library_id}
+        for job in gif_jobs:
+            job.status = "succeeded"
+        library_item = session.get(GifLibraryItem, gif_library_id)
+        assert library_item is not None
+        library_path = Path(library_item.stored_path)
+        assert library_path.is_file()
         audit = session.scalar(
             select(AuditLog).where(
                 AuditLog.action == "chat.sticker_preferences.update"
             )
         )
         assert audit is not None
+        session.commit()
+
+    wrong_delete = client.request(
+        "DELETE",
+        f"/api/v1/chat/gifs/{gif_library_id}",
+        headers={"X-CSRF-Token": csrf},
+        json={"confirmation": "wrong.gif"},
+    )
+    assert wrong_delete.status_code == 422
+    deleted = client.request(
+        "DELETE",
+        f"/api/v1/chat/gifs/{gif_library_id}",
+        headers={"X-CSRF-Token": csrf},
+        json={"confirmation": "wave.gif"},
+    )
+    assert deleted.status_code == 200
+    assert deleted.json()["deleted"] is True
+    assert not library_path.exists()
+    assert client.get("/api/v1/chat/gifs").json()["quota"]["used_items"] == 0

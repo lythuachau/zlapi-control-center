@@ -122,3 +122,23 @@ def outbound_media_url(
         f"{base}/media/outbound/{quote(upload_id, safe='')}"
         f"?expires={expires}&signature={signature}"
     )
+
+
+def gif_library_media_url(
+    settings: Settings,
+    gif_id: str,
+    *,
+    expires: int | None = None,
+) -> str:
+    expires = expires or int(time.time()) + (24 * 60 * 60)
+    signature = outbound_signature(settings, gif_id, expires)
+    scheme = "https" if settings.app_env == "production" else "http"
+    domain = settings.domain.strip().rstrip("/")
+    if domain.startswith(("http://", "https://")):
+        base = domain
+    else:
+        base = f"{scheme}://{domain}"
+    return (
+        f"{base}/media/gif-library/{quote(gif_id, safe='')}"
+        f"?expires={expires}&signature={signature}"
+    )

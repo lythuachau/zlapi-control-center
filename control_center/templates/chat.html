@@ -1,7 +1,7 @@
 {% extends "base.html" %}
 
 {% block head %}
-  <link rel="stylesheet" href="{{ url_for('static', path='/css/chat.css') }}?v=20260730-rich-media">
+  <link rel="stylesheet" href="{{ url_for('static', path='/css/chat.css') }}?v=20260730-gif-library">
 {% endblock %}
 
 {% block content %}
@@ -11,6 +11,7 @@
   data-can-send="{{ 'true' if can_send else 'false' }}"
   data-can-manage-jobs="{{ 'true' if can_manage_jobs else 'false' }}"
   data-can-manage-reactions="{{ 'true' if can_manage_reactions else 'false' }}"
+  data-can-manage-gif-library="{{ 'true' if can_manage_gif_library else 'false' }}"
   data-can-manage-groups="{{ 'true' if can_manage_groups else 'false' }}"
   data-max-upload-mb="{{ max_upload_mb }}"
 >
@@ -656,14 +657,37 @@
           </div>
 
           <div class="zchat-rich-panel" data-rich-panel="gif" hidden>
-            <div class="zchat-rich-upload-zone" id="chat-gif-select">
+            <div class="zchat-gif-toolbar">
+              <label class="zchat-dialog-search">
+                <span>⌕</span>
+                <input id="chat-gif-search" type="search" placeholder="Tìm GIF theo tên…">
+              </label>
+              <div class="zchat-sticker-filters" role="tablist" aria-label="Lọc GIF">
+                <button class="active" type="button" data-gif-filter="all">Tất cả</button>
+                <button type="button" data-gif-filter="recent">Gần đây</button>
+                <button type="button" data-gif-filter="favorite">Yêu thích</button>
+              </div>
+            </div>
+            <div class="zchat-gif-grid" id="chat-gif-grid"></div>
+            <p class="zchat-rich-help" id="chat-gif-status">
+              Đang tải thư viện GIF dùng chung…
+            </p>
+            <div class="zchat-rich-upload-zone compact" id="chat-gif-select">
               <span>GIF</span>
-              <strong>Chọn ảnh động từ máy</strong>
-              <small>Tệp .gif, tối đa {{ max_upload_mb }} MB</small>
+              <span>
+                <strong>Thêm GIF từ máy</strong>
+                <small>Tệp .gif, tối đa {{ max_upload_mb }} MB</small>
+              </span>
               <button type="button">Chọn GIF</button>
             </div>
             <input id="chat-gif-input" type="file" accept="image/gif,.gif" hidden>
-            <p class="zchat-rich-help">GIF chỉ được tải lên khi bạn bấm gửi.</p>
+            <label class="zchat-gif-save-option">
+              <input id="chat-gif-save-library" type="checkbox" checked>
+              <span>
+                <strong>Lưu vào thư viện sau khi gửi</strong>
+                <small>Mặc định bật · GIF trùng sẽ không chiếm thêm dung lượng.</small>
+              </span>
+            </label>
           </div>
 
           <div class="zchat-rich-panel" data-rich-panel="link" hidden>
@@ -816,5 +840,5 @@
 {% endblock %}
 
 {% block scripts %}
-  <script defer src="{{ url_for('static', path='/js/chat.js') }}?v=20260730-rich-media"></script>
+  <script defer src="{{ url_for('static', path='/js/chat.js') }}?v=20260730-gif-library"></script>
 {% endblock %}

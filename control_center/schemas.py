@@ -92,6 +92,8 @@ class ChatRichMediaCreate(BaseModel):
     text: str = Field(default="", max_length=4000)
     reply_event_id: int | None = Field(default=None, ge=1)
     upload_token: str | None = Field(default=None, pattern=r"^upload:[a-f0-9]{32}$")
+    gif_library_id: str | None = Field(default=None, max_length=36)
+    save_to_library: bool = True
     sticker_id: str | None = Field(default=None, min_length=1, max_length=40)
     category_id: str | None = Field(default=None, min_length=1, max_length=40)
     sticker_type: int = Field(default=1, ge=0, le=100)
@@ -144,6 +146,14 @@ class ChatStickerPreference(BaseModel):
 class ChatStickerPreferencesUpdate(BaseModel):
     account_id: str
     favorites: list[ChatStickerPreference] = Field(default_factory=list, max_length=48)
+
+
+class ChatGifLibraryUpdate(BaseModel):
+    favorite: bool
+
+
+class ChatGifLibraryDelete(BaseModel):
+    confirmation: str = Field(min_length=1, max_length=255)
 
 
 class ChatReadStateUpdate(BaseModel):
