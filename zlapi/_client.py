@@ -10,7 +10,7 @@ from .logging import Logging
 from websockets.sync.client import connect
 from concurrent.futures import ThreadPoolExecutor
 
-pool = ThreadPoolExecutor(max_workers=9999)
+pool = ThreadPoolExecutor(max_workers=min(32, (os.cpu_count() or 1) + 4))
 logger = Logging(theme="catppuccin-mocha", log_text_color="black")
 
 class ZaloAPI(object):
@@ -208,7 +208,7 @@ class ZaloAPI(object):
 			
 		files = [("chunkContent", open(filePath, "rb"))]
 		fileSize = len(open(filePath, "rb").read())
-		fileName = filePath if "/" not in filePath else filePath.rstrip("/")[1]
+		fileName = os.path.basename(filePath)
 		
 		params = {
 			"params": {
@@ -667,11 +667,12 @@ class ZaloAPI(object):
 		response = self._get("https://groupboard-wpa.chat.zalo.me/api/board/list", params=params)
 		data = response.json()
 		results = data.get("data") if data.get("error_code") == 0 else None
-		if results:
+		if data.get("error_code") == 0:
+			if results in (None, ""):
+				return Group.fromDict({}, None)
 			results = self._decode(results)
-			results = Group.fromDict(results.get("data"), None)
-			
-			return results
+			decoded = results.get("data") if isinstance(results, dict) else results
+			return Group.fromDict(decoded or {}, None)
 			
 		error_code = data.get("error_code")
 		error_message = data.get("error_message") or data.get("data")
@@ -2737,7 +2738,7 @@ class ZaloAPI(object):
 		error_message = data.get("error_message") or data.get("data")
 		raise ZaloAPIException(f"Error #{error_code} when sending requests: {error_message}")
 	
-	def sendReaction(self, messageObject, reactionIcon, thread_id, thread_type, reactionType=75):
+	def sendReaction(self, messageObject, reactionIcon, thread_id, thread_type, reactionType=75, source=6):
 		"""Reaction message by ID.
 			
 		Args:
@@ -2769,7 +2770,7 @@ class ZaloAPI(object):
 						}],
 						"rIcon": reactionIcon,
 						"rType": reactionType,
-						"source": 6
+					"source": source
 					}),
 					"clientId": _util.now()
 				}],
@@ -2917,18 +2918,15 @@ class ZaloAPI(object):
 		Raises:
 			ZaloAPIException: If request failed
 		"""
-		if not fileSize:
-			try:
-				with self._state._session.get(fileUrl) as response:
-					if response.status_code == 200:
-						fileSize = int(response.headers.get("Content-Length", len(response.content)))
-					else:
-						fileSize = 0
-					
-					fileChecksum = hashlib.md5(response.content).hexdigest()
-			
-			except:
-				raise ZaloAPIException("Unable to get url content")
+		try:
+			with self._state._session.get(fileUrl, timeout=30) as response:
+				response.raise_for_status()
+				content = response.content
+				if not fileSize:
+					fileSize = int(response.headers.get("Content-Length", len(content)))
+				fileChecksum = hashlib.md5(content).hexdigest()
+		except Exception as exc:
+			raise ZaloAPIException(f"Unable to get url content: {exc}") from exc
 		
 		has_extension = fileName.rsplit(".")
 		extension = has_extension[-1:][0] if len(has_extension) >= 2 else extension
@@ -2983,11 +2981,7 @@ class ZaloAPI(object):
 				except:
 					results = {"error_code": 1337, "error_message": results}
 			
-			return (
-				Group.fromDict(results, None) 
-				if thread_type == ThreadType.GROUP else 
-				User.fromDict(results, None)
-			)
+			return User.fromDict(results, None)
 			
 		error_code = data.get("error_code")
 		error_message = data.get("error_message") or data.get("data")
@@ -4182,20 +4176,20 @@ class ZaloAPI(object):
 					
 					elif n == 1 and cmd == 521 and s == 0:
 						groupMsgs = parsedData["data"]["groupMsgs"]
-						
-						try:
-							for message in groupMsgs:
+
+						for message in groupMsgs:
+							try:
 								messages = self.getRecentGroup(message["idTo"])["groupMsgs"]
 								message = next((msg for msg in messages if msg["msgId"] == message["msgId"]), message)
-						except:
-							pass
-							
-						msgObj = MessageObject.fromDict(message, None)
-						[
-							pool.submit(self.onMessage, msgObj.msgId, str(int(msgObj.uidFrom) or self.uid), msgObj.content, msgObj, str(int(msgObj.idTo) or self.uid), ThreadType.GROUP)
-							if thread else
-							self.onMessage(msgObj.msgId, str(int(msgObj.uidFrom) or self.uid), msgObj.content, msgObj, str(int(msgObj.idTo) or self.uid), ThreadType.GROUP)
-						]
+							except Exception:
+								pass
+
+							msgObj = MessageObject.fromDict(message, None)
+							[
+								pool.submit(self.onMessage, msgObj.msgId, str(int(msgObj.uidFrom) or self.uid), msgObj.content, msgObj, str(int(msgObj.idTo) or self.uid), ThreadType.GROUP)
+								if thread else
+								self.onMessage(msgObj.msgId, str(int(msgObj.uidFrom) or self.uid), msgObj.content, msgObj, str(int(msgObj.idTo) or self.uid), ThreadType.GROUP)
+							]
 					
 					elif n == 1 and cmd in [502, 522, 504, 524] and s == 0:
 						# Delivereds, Seen, Clear Unread, ...
@@ -4325,6 +4319,7 @@ class ZaloAPI(object):
 	
 	def stopListening(self):
 		"""Stop the listening loop."""
+		self._listening = False
 		self.listening = False
 		self._condition.set()
 	

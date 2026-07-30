@@ -1,5 +1,6 @@
 # -*- coding: UTF-8 -*-
 
+import struct
 import websocket
 
 from ..Async import _state
@@ -4271,6 +4272,7 @@ class ZaloAPI(object):
 		
 		self.ws = ws
 		self.thread = thread
+		self.reconnect = reconnect
 		
 		def ws_run_forever(reconnect=reconnect):
 			if not isinstance(reconnect, int):
@@ -4400,11 +4402,11 @@ class ZaloAPI(object):
 					]
 		
 		except websocket.WebSocketConnectionClosedException:
-			if not isinstance(reconnect, int):
-				reconnect = 5
-			
-			await asyncio.sleep(reconnect)
-			self._listen(thread, reconnect)
+			if not isinstance(self.reconnect, int):
+				self.reconnect = 5
+
+			await asyncio.sleep(self.reconnect)
+			await self._listen(self.thread, self.reconnect)
 		
 		except Exception as e:
 			await self.on_error_callback(e)

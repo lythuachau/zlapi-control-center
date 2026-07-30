@@ -1,0 +1,24 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="mb-6 flex flex-wrap items-end justify-between gap-4">
+  <div><h2 class="text-2xl font-bold tracking-tight">Quyền truy cập</h2><p class="mt-1 text-sm text-muted">Không có đăng ký công khai; admin cấp tài khoản và vai trò.</p></div>
+  <button class="btn-primary" data-open-modal="user-modal">+ Tạo người dùng</button>
+</div>
+<section class="panel">
+  <div class="table-wrap"><table class="table"><thead><tr><th>Người dùng</th><th>Vai trò</th><th>Trạng thái</th><th>Lần đăng nhập</th><th>Ngày tạo</th></tr></thead><tbody>
+  {% for item in users %}<tr><td><strong>{{ item.display_name }}</strong><small class="block text-muted">@{{ item.username }}</small></td><td><span class="badge-running">{{ item.role }}</span></td><td><span class="badge-{{ 'online' if item.active else 'offline' }}">{{ 'Active' if item.active else 'Disabled' }}</span></td><td class="text-muted">{{ item.last_login_at.strftime('%H:%M %d/%m') if item.last_login_at else '—' }}</td><td class="text-muted">{{ item.created_at.strftime('%d/%m/%Y') }}</td></tr>{% endfor %}
+  </tbody></table></div>
+</section>
+{% endblock %}
+{% block modals %}
+<div class="modal-backdrop" id="user-modal"><section class="modal max-w-lg">
+  <div class="panel-header"><div><h2 class="font-semibold">Tạo người dùng</h2><p class="text-sm text-muted">Mật khẩu tối thiểu 12 ký tự.</p></div><button class="icon-btn" data-close-modal>×</button></div>
+  <form id="user-form" class="space-y-5 p-5">
+    <div class="field"><label>Tên hiển thị</label><input class="input" name="display_name" required></div>
+    <div class="field"><label>Tên đăng nhập</label><input class="input" name="username" required pattern="[a-zA-Z0-9_.-]{3,64}"></div>
+    <div class="field"><label>Mật khẩu</label><input class="input" name="password" type="password" minlength="12" required></div>
+    <div class="field"><label>Vai trò</label><select class="input" name="role"><option value="viewer">Viewer</option><option value="operator">Operator</option><option value="admin">Admin</option>{% if user.role == 'super_admin' %}<option value="super_admin">Super Admin</option>{% endif %}</select></div>
+    <div class="flex justify-end gap-3"><button class="btn-secondary" data-close-modal type="button">Hủy</button><button class="btn-primary">Tạo tài khoản</button></div>
+  </form>
+</section></div>
+{% endblock %}

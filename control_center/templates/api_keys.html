@@ -1,0 +1,22 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="mb-6 flex flex-wrap items-end justify-between gap-4">
+  <div><h2 class="text-2xl font-bold tracking-tight">Machine access</h2><p class="mt-1 text-sm text-muted">API key chỉ hiển thị đúng một lần khi tạo.</p></div>
+  <button class="btn-primary" data-open-modal="key-modal">+ Tạo API key</button>
+</div>
+<section class="panel"><div class="table-wrap"><table class="table"><thead><tr><th>Tên</th><th>Prefix</th><th>Scopes</th><th>Trạng thái</th><th>Last used</th><th></th></tr></thead><tbody>
+{% for key in keys %}<tr><td><strong>{{ key.name }}</strong><small class="block text-muted">{{ key.created_at.strftime('%d/%m/%Y') }}</small></td><td class="font-mono">zlc_{{ key.prefix }}_…</td><td><span class="max-w-sm text-xs text-muted">{{ key.scopes|join(', ') }}</span></td><td><span class="badge-{{ 'cancelled' if key.revoked_at else 'online' }}">{{ 'Revoked' if key.revoked_at else 'Active' }}</span></td><td class="text-muted">{{ key.last_used_at.strftime('%H:%M %d/%m') if key.last_used_at else 'Never' }}</td><td>{% if not key.revoked_at %}<button class="btn-danger py-2" data-revoke-key="{{ key.id }}">Revoke</button>{% endif %}</td></tr>
+{% else %}<tr><td colspan="6"><div class="empty">Chưa có API key.</div></td></tr>{% endfor %}
+</tbody></table></div></section>
+{% endblock %}
+{% block modals %}
+<div class="modal-backdrop" id="key-modal"><section class="modal max-w-lg">
+  <div class="panel-header"><div><h2 class="font-semibold">Tạo API key</h2><p class="text-sm text-muted">Dùng dấu phẩy để phân tách scopes.</p></div><button class="icon-btn" data-close-modal>×</button></div>
+  <form id="key-form" class="space-y-5 p-5">
+    <div class="field"><label>Tên key</label><input class="input" name="name" required placeholder="Internal automation"></div>
+    <div class="field"><label>Scopes</label><input class="input" name="scopes" value="read,jobs:create" required></div>
+    <div class="field"><label>Hết hạn <span class="text-muted">(không bắt buộc)</span></label><input class="input" name="expires_at" type="datetime-local"></div>
+    <div class="flex justify-end gap-3"><button class="btn-secondary" data-close-modal type="button">Hủy</button><button class="btn-primary">Tạo key</button></div>
+  </form>
+</section></div>
+{% endblock %}

@@ -1,0 +1,23 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.coverage
+.data/
+.env
+.pytest_cache/
+.ruff_cache/
+.venv/
+alembic-bootstrap.db
+htmlcov/
+migration-check.db
+node_modules/
+zlapi-control.db
+*.db
+
+# Generated artifacts from the optional chat UI workspace.
+chat-ui-concepts/.vinext/
+chat-ui-concepts/.wrangler/
+chat-ui-concepts/dist/
+chat-ui-concepts/node_modules/

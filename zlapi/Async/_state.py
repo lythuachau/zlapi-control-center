@@ -9,8 +9,8 @@ from .. import _util, _exception
 class State(object):
 	def __init__(cls):
 		cls._config = {}
-		cls._headers = _util.HEADERS
-		cls._cookies = _util.COOKIES
+		cls._headers = dict(_util.HEADERS)
+		cls._cookies = dict(_util.COOKIES)
 		cls.user_id = None
 		cls.user_imei = None
 		cls._loggedin = False
@@ -67,6 +67,7 @@ class State(object):
 						cls.user_imei = imei
 						cls.user_id = cls._config.get("send2me_id")
 						cls._config["secret_key"] = cls._config.get("zpw_enk")
+						cls._loggedin = True
 						
 					else:
 						cls._loggedin = False

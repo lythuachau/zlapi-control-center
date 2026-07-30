@@ -1,0 +1,24 @@
+<service>
+  <id>zlapi-caddy</id>
+  <name>ZLAPI Control Center Caddy</name>
+  <description>HTTPS reverse proxy for ZLAPI Control Center.</description>
+  <executable>{{SERVICE_ROOT}}\bin\caddy.exe</executable>
+  <arguments>run --environ --config "{{SERVICE_ROOT}}\shared\Caddyfile"</arguments>
+  <workingdirectory>{{SERVICE_ROOT}}\shared</workingdirectory>
+  <env name="XDG_DATA_HOME" value="{{DATA_ROOT}}\caddy\data"/>
+  <env name="XDG_CONFIG_HOME" value="{{DATA_ROOT}}\caddy\config"/>
+  <startmode>Automatic</startmode>
+  <stoptimeout>30sec</stoptimeout>
+  <stopparentprocessfirst>true</stopparentprocessfirst>
+  <onfailure action="restart" delay="5 sec"/>
+  <onfailure action="restart" delay="15 sec"/>
+  <resetfailure>1 hour</resetfailure>
+  <logpath>{{DATA_ROOT}}\logs</logpath>
+  <log mode="roll-by-size-time">
+    <sizeThreshold>10485760</sizeThreshold>
+    <pattern>yyyyMMdd</pattern>
+    <autoRollAtTime>00:00:00</autoRollAtTime>
+    <zipOlderThanNumDays>7</zipOlderThanNumDays>
+    <zipDateFormat>yyyyMM</zipDateFormat>
+  </log>
+</service>

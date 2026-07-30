@@ -4,7 +4,7 @@ from pathlib import Path
 VERSION = '1.0.2'
 DESCRIPTION = 'zlapi: Zalo API for Python'
 this_directory = Path(__file__).parent
-LONG_DESCRIPTION = (this_directory / "README.md").read_text()
+LONG_DESCRIPTION = (this_directory / "README.md").read_text(encoding="utf-8")
 
 # Setting up
 setup(

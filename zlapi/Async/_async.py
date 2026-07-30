@@ -37,11 +37,19 @@ class ZaloAPI(object):
 		
 		if auto_login:
 			if (
-				not session_cookies 
-				or not self.setSession(session_cookies) 
+				not session_cookies
+				or not self.setSession(session_cookies)
 				or not self.isLoggedIn()
 			):
-				asyncio.run(self.login(phone, password, imei, user_agent))
+				try:
+					asyncio.get_running_loop()
+				except RuntimeError:
+					asyncio.run(self.login(phone, password, imei, user_agent))
+				else:
+					raise ZaloUserError(
+						"auto_login cannot run inside an active event loop; "
+						"construct with auto_login=False and await login()"
+					)
 	
 	def uid(self):
 		"""The ID of the client."""
@@ -216,7 +224,7 @@ class ZaloAPI(object):
 			
 		files = [("chunkContent", open(filePath, "rb"))]
 		fileSize = len(open(filePath, "rb").read())
-		fileName = filePath if "/" not in filePath else filePath.rstrip("/")[1]
+		fileName = os.path.basename(filePath)
 		
 		params = {
 			"params": {

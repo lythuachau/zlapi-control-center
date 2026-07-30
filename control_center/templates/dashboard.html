@@ -1,0 +1,66 @@
+{% extends "base.html" %}
+{% block content %}
+<section class="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
+  <article class="metric">
+    <div class="flex items-start justify-between"><p class="metric-label">Tài khoản quản lý</p><span class="nav-icon brand">ZA</span></div>
+    <p class="metric-value">{{ account_total }}</p>
+    <p class="mt-2 text-xs text-muted"><span class="text-emerald-500">{{ online_total }} online</span> ngay lúc này</p>
+  </article>
+  <article class="metric">
+    <div class="flex items-start justify-between"><p class="metric-label">Jobs đang chờ</p><span class="nav-icon text-amber-500">Q</span></div>
+    <p class="metric-value">{{ queued_total }}</p>
+    <p class="mt-2 text-xs text-muted">Worker xử lý theo độ ưu tiên</p>
+  </article>
+  <article class="metric">
+    <div class="flex items-start justify-between"><p class="metric-label">Jobs lỗi</p><span class="nav-icon text-rose-500">!</span></div>
+    <p class="metric-value">{{ failed_total }}</p>
+    <p class="mt-2 text-xs text-muted">Có thể retry từ Jobs & Events</p>
+  </article>
+  <article class="metric overflow-hidden">
+    <div class="flex items-start justify-between"><p class="metric-label">Kênh sự kiện</p><span class="nav-icon text-cyan-500">↯</span></div>
+    <p class="metric-value text-emerald-500">Live</p>
+    <p class="mt-2 text-xs text-muted">SSE cập nhật mỗi giây</p>
+  </article>
+</section>
+
+<section class="mt-6 grid gap-6 xl:grid-cols-[1.45fr_1fr]">
+  <article class="panel min-w-0">
+    <div class="panel-header">
+      <div><h2 class="font-semibold">Hoạt động gần đây</h2><p class="text-sm text-muted">Luồng job mới nhất</p></div>
+      <a href="/jobs" class="btn-secondary py-2">Xem tất cả</a>
+    </div>
+    {% if recent_jobs %}
+    <div class="table-wrap">
+      <table class="table">
+        <thead><tr><th>Hành động</th><th>Tài khoản</th><th>Trạng thái</th><th>Thời gian</th></tr></thead>
+        <tbody>
+          {% for job in recent_jobs %}
+          <tr>
+            <td><strong>{{ job.action }}</strong><small class="block font-mono text-muted">{{ job.id[:8] }}</small></td>
+            <td>{{ job.account_name or '—' }}</td>
+            <td><span class="badge-{{ job.status }}"><span class="dot"></span>{{ job.status }}</span></td>
+            <td class="text-muted">{{ job.created_at.strftime('%H:%M %d/%m') }}</td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    {% else %}<div class="empty">Chưa có job. Hãy kiểm tra tài khoản hoặc chạy một action.</div>{% endif %}
+  </article>
+
+  <article class="panel min-w-0">
+    <div class="panel-header"><div><h2 class="font-semibold">Realtime events</h2><p class="text-sm text-muted">50 kết nối mới nhất được fan-out qua SSE</p></div></div>
+    <div class="divide-y" id="live-events">
+      {% for event in recent_events %}
+      <div class="flex gap-3 px-5 py-4">
+        <span class="mt-1 h-2 w-2 shrink-0 rounded-full bg-cyan-500"></span>
+        <div class="min-w-0"><strong class="block truncate text-sm">{{ event.event_type }}</strong><p class="truncate text-xs text-muted">{{ event.thread_id or event.account_id or 'system' }}</p></div>
+        <time class="ml-auto shrink-0 text-xs text-muted">{{ event.created_at.strftime('%H:%M') }}</time>
+      </div>
+      {% else %}
+      <div class="empty">Listener chưa ghi nhận sự kiện.</div>
+      {% endfor %}
+    </div>
+  </article>
+</section>
+{% endblock %}

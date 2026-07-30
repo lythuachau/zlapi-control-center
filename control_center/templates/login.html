@@ -1,0 +1,47 @@
+<!doctype html>
+<html lang="vi" data-theme="dark">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Đăng nhập · ZLAPI Control Center</title>
+  <link rel="stylesheet" href="{{ url_for('static', path='/css/app.css') }}">
+</head>
+<body>
+  <main class="relative grid min-h-screen place-items-center overflow-hidden p-5">
+    <div class="absolute -left-40 -top-40 h-96 w-96 rounded-full bg-teal-500/20 blur-3xl"></div>
+    <div class="absolute -bottom-44 -right-36 h-96 w-96 rounded-full bg-cyan-500/15 blur-3xl"></div>
+    <section class="panel relative z-10 w-full max-w-md overflow-hidden p-7 sm:p-9">
+      <div class="mb-8 flex items-center gap-4">
+        <span class="grid h-14 w-14 place-items-center rounded-2xl bg-gradient-to-br from-teal-500 to-cyan-500 text-2xl font-black text-white shadow-xl shadow-teal-500/20">Z</span>
+        <div>
+          <h1 class="text-xl font-bold tracking-tight">ZLAPI Control Center</h1>
+          <p class="text-sm text-muted">Đăng nhập vào không gian vận hành</p>
+        </div>
+      </div>
+      {% if changed %}
+      <div class="mb-5 rounded-xl border border-emerald-500/30 bg-emerald-500/10 px-4 py-3 text-sm text-emerald-500" role="status">
+        Đổi mật khẩu thành công. Hãy đăng nhập lại bằng mật khẩu mới.
+      </div>
+      {% endif %}
+      {% if error %}
+      <div class="mb-5 rounded-xl border border-rose-500/30 bg-rose-500/10 px-4 py-3 text-sm text-rose-500">
+        {% if error == 'locked' %}Tài khoản tạm khóa 15 phút do đăng nhập sai nhiều lần.{% else %}Tên đăng nhập hoặc mật khẩu không đúng.{% endif %}
+      </div>
+      {% endif %}
+      <form action="/login" method="post" class="space-y-5">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        <div class="field">
+          <label for="username">Tên đăng nhập</label>
+          <input class="input" id="username" name="username" autocomplete="username" required autofocus>
+        </div>
+        <div class="field">
+          <label for="password">Mật khẩu</label>
+          <input class="input" id="password" name="password" type="password" autocomplete="current-password" required>
+        </div>
+        <button class="btn-primary w-full py-3" type="submit">Đăng nhập an toàn</button>
+      </form>
+      <p class="mt-7 text-center text-xs leading-5 text-muted">Không có đăng ký công khai. Tài khoản được cấp bởi quản trị viên.</p>
+    </section>
+  </main>
+</body>
+</html>

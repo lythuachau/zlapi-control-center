@@ -1,0 +1,54 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="mb-6 flex flex-wrap items-end justify-between gap-4">
+  <div><h2 class="text-2xl font-bold tracking-tight">Action catalog</h2><p class="mt-1 text-sm text-muted">Mọi action chạy qua queue, retry và audit log.</p></div>
+  <a class="btn-secondary" href="/api/docs" target="_blank" rel="noopener">OpenAPI Docs ↗</a>
+</div>
+
+<section class="grid gap-6 xl:grid-cols-[360px_1fr]">
+  <aside class="panel max-h-[calc(100vh-155px)] overflow-hidden">
+    <div class="border-b p-4"><input class="input" id="action-search" type="search" placeholder="Tìm action…"></div>
+    <div class="max-h-[calc(100vh-230px)] overflow-y-auto p-3" id="action-list">
+      {% for category, items in catalog|groupby('category') %}
+      <div class="action-group mb-4">
+        <p class="px-2 py-2 text-[11px] font-bold uppercase tracking-[.16em] text-muted">{{ category }}</p>
+        {% for action in items %}
+        <button class="action-item flex w-full items-center gap-3 rounded-xl px-3 py-2.5 text-left text-sm transition hover:surface-muted" data-action="{{ action.name }}">
+          <span class="h-2 w-2 shrink-0 rounded-full {% if action.status == 'ready' %}bg-emerald-500{% elif action.status == 'unstable' %}bg-amber-500{% else %}bg-rose-500{% endif %}"></span>
+          <span class="min-w-0 flex-1 truncate font-medium">{{ action.name }}</span>
+          {% if action.dangerous %}<span class="text-rose-500">!</span>{% endif %}
+        </button>
+        {% endfor %}
+      </div>
+      {% endfor %}
+    </div>
+  </aside>
+
+  <article class="panel min-h-[620px]">
+    <div class="panel-header">
+      <div><div class="flex items-center gap-3"><h2 class="font-mono text-lg font-semibold" id="action-title">Chọn một action</h2><span id="action-status"></span></div><p class="mt-1 text-sm text-muted" id="action-description">Schema sẽ được tạo từ chữ ký của thư viện ZLAPI.</p></div>
+    </div>
+    <form id="action-form" class="space-y-6 p-5">
+      <div class="field">
+        <label for="action-account">Tài khoản thực thi</label>
+        <select class="input" id="action-account" required>
+          <option value="">Chọn tài khoản…</option>
+          {% for account in accounts %}<option value="{{ account.id }}">{{ account.name }} · {{ account.status }}</option>{% endfor %}
+        </select>
+      </div>
+      <div class="grid gap-5 sm:grid-cols-2" id="action-fields"></div>
+      <div class="hidden rounded-xl border border-rose-500/30 bg-rose-500/10 p-4 text-sm text-rose-500" id="danger-warning">
+        Đây là thao tác nguy hiểm. Hệ thống sẽ yêu cầu xác nhận hai bước trước khi xếp hàng.
+      </div>
+      <div class="flex flex-wrap items-center justify-between gap-3 border-t pt-5">
+        <p class="text-xs text-muted">Kết quả xuất hiện tại Jobs & Events.</p>
+        <button class="btn-primary" id="run-action" type="submit" disabled>Chạy action</button>
+      </div>
+    </form>
+    <div class="hidden border-t p-5" id="action-response-wrap">
+      <div class="mb-3 flex items-center justify-between"><h3 class="font-semibold">Response</h3><a href="/jobs" class="text-sm brand">Mở Jobs →</a></div>
+      <pre class="codebox" id="action-response"></pre>
+    </div>
+  </article>
+</section>
+{% endblock %}

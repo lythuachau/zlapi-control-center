@@ -1,0 +1,64 @@
+[build-system]
+requires = ["setuptools>=75", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "zlapi-control-center"
+version = "0.1.0"
+description = "Windows-native control center for the unofficial zlapi client"
+readme = "README.md"
+requires-python = ">=3.12"
+license = { text = "MIT" }
+dependencies = [
+  "aenum>=3.1,<4",
+  "aiohttp>=3.10,<4",
+  "alembic>=1.14,<2",
+  "argon2-cffi>=23.1,<26",
+  "attrs>=25,<27",
+  "cryptography>=44,<47",
+  "fastapi>=0.115,<1",
+  "itsdangerous>=2.2,<3",
+  "jinja2>=3.1,<4",
+  "munch>=4,<5",
+  "psycopg[binary]>=3.2,<4",
+  "pycryptodome>=3.21,<4",
+  "pydantic-settings>=2.7,<3",
+  "python-multipart>=0.0.20,<1",
+  "requests>=2.32,<3",
+  "sqlalchemy>=2.0,<3",
+  "uvicorn[standard]>=0.34,<1",
+  "websockets>=12,<16",
+  "zstandard>=0.23,<1",
+]
+
+[project.optional-dependencies]
+dev = [
+  "httpx>=0.28,<1",
+  "pytest>=8.3,<9",
+  "pytest-cov>=6,<8",
+  "ruff>=0.11,<1",
+]
+
+[project.scripts]
+zlapi-admin = "control_center.cli:main"
+zlapi-worker = "control_center.worker:main"
+zlapi-listener = "control_center.listener:main"
+zlapi-maintenance = "control_center.maintenance:main"
+
+[tool.setuptools.packages.find]
+include = ["zlapi*", "control_center*"]
+
+[tool.setuptools.package-data]
+control_center = ["templates/*.html", "static/**/*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+
+[tool.ruff]
+line-length = 110
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP"]
+ignore = ["B008", "E501"]

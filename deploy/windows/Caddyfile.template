@@ -1,0 +1,32 @@
+{{DOMAIN}} {
+	{{TLS_DIRECTIVE}}
+
+	encode zstd gzip
+
+	request_body {
+		max_size 30MB
+	}
+
+	reverse_proxy 127.0.0.1:8000 {
+		health_uri /health/live
+		health_interval 30s
+		health_timeout 5s
+	}
+
+	header {
+		-Server
+		X-Content-Type-Options "nosniff"
+		X-Frame-Options "DENY"
+		Referrer-Policy "strict-origin-when-cross-origin"
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+	}
+
+	log {
+		output file "{{DATA_ROOT}}\logs\caddy-access.log" {
+			roll_size 10MiB
+			roll_keep 10
+			roll_keep_for 168h
+		}
+		format json
+	}
+}

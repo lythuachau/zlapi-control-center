@@ -22,8 +22,8 @@ headers = {
 class State(object):
 	def __init__(cls):
 		cls._config = {}
-		cls._headers = _util.HEADERS
-		cls._cookies = _util.COOKIES
+		cls._headers = dict(_util.HEADERS)
+		cls._cookies = dict(_util.COOKIES)
 		cls._session = requests.Session()
 		cls.user_id = None
 		cls.user_imei = None
@@ -42,11 +42,13 @@ class State(object):
 		cls._config["secret_key"] = secret_key
 	
 	def _get(cls, *args, **kwargs):
+		kwargs.setdefault("timeout", 30)
 		sessionObj = cls._session.get(*args, **kwargs, headers=cls._headers, cookies=cls._cookies)
 		
 		return sessionObj
 		
 	def _post(cls, *args, **kwargs):
+		kwargs.setdefault("timeout", 30)
 		sessionObj = cls._session.post(*args, **kwargs, headers=cls._headers, cookies=cls._cookies)
 		return sessionObj
 	

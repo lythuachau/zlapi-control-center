@@ -1,0 +1,16 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="mb-6"><h2 class="text-2xl font-bold tracking-tight">Hạ tầng Windows-native</h2><p class="mt-1 text-sm text-muted">Không Docker, VM, WSL, Redis hoặc PostgreSQL cục bộ.</p></div>
+<section class="grid gap-4 sm:grid-cols-3">
+  <article class="metric"><p class="metric-label">Database</p><p class="metric-value text-xl">{{ db_dialect|upper }}</p><p class="mt-2 text-xs text-muted">Pool cố định, pre-ping bật</p></article>
+  <article class="metric"><p class="metric-label">Event cursor</p><p class="metric-value">#{{ event_cursor }}</p><p class="mt-2 text-xs text-muted">Một tailer dùng chung cho SSE</p></article>
+  <article class="metric"><p class="metric-label">Archives</p><p class="metric-value">{{ archive_count }}</p><p class="mt-2 text-xs text-muted">Zstandard + AES-GCM</p></article>
+</section>
+<section class="panel mt-6">
+  <div class="panel-header"><div><h2 class="font-semibold">Service topology</h2><p class="text-sm text-muted">Tất cả service tự khởi động qua WinSW.</p></div><button class="btn-secondary py-2" id="check-health">Kiểm tra ngay</button></div>
+  <div class="grid gap-4 p-5 sm:grid-cols-2 xl:grid-cols-4">
+    {% for service in services %}<article class="rounded-2xl border p-4 surface-muted"><div class="flex items-center justify-between"><strong>{{ service }}</strong><span class="h-2.5 w-2.5 rounded-full bg-emerald-500"></span></div><p class="mt-2 text-xs text-muted">Windows Service · Automatic</p></article>{% endfor %}
+  </div>
+  <div class="hidden border-t p-5" id="health-result"><pre class="codebox"></pre></div>
+</section>
+{% endblock %}

@@ -1,0 +1,38 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="mb-6"><h2 class="text-2xl font-bold tracking-tight">Execution timeline</h2><p class="mt-1 text-sm text-muted">Theo dõi retry, lỗi và event nhận từ listener.</p></div>
+<section class="panel">
+  <div class="panel-header"><div><h2 class="font-semibold">Jobs</h2><p class="text-sm text-muted">Tự làm mới mỗi 5 giây</p></div><button class="btn-secondary py-2" id="refresh-jobs">Làm mới</button></div>
+  <div class="table-wrap">
+    <table class="table">
+      <thead><tr><th>Action</th><th>Account</th><th>Trạng thái</th><th>Attempts</th><th>Thời gian</th><th></th></tr></thead>
+      <tbody id="jobs-body">
+      {% for job in jobs %}
+        <tr data-job-id="{{ job.id }}">
+          <td><strong>{{ job.action }}</strong><small class="block font-mono text-muted">{{ job.id[:8] }}</small>{% if job.error %}<small class="block max-w-sm truncate text-rose-500">{{ job.error }}</small>{% endif %}</td>
+          <td>{{ job.account_name or '—' }}</td>
+          <td><span class="badge-{{ job.status }}"><span class="dot"></span>{{ job.status }}</span></td>
+          <td>{{ job.attempts }}/{{ job.max_attempts }}</td>
+          <td class="text-muted">{{ job.created_at.strftime('%H:%M %d/%m') }}</td>
+          <td class="text-right">{% if job.status in ['failed', 'cancelled'] %}<button class="btn-secondary py-2" data-retry-job="{{ job.id }}">Retry</button>{% elif job.status == 'queued' %}<button class="btn-secondary py-2" data-cancel-job="{{ job.id }}">Cancel</button>{% endif %}</td>
+        </tr>
+      {% else %}<tr><td colspan="6"><div class="empty">Chưa có job.</div></td></tr>{% endfor %}
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<section class="panel mt-6">
+  <div class="panel-header"><div><h2 class="font-semibold">Listener events</h2><p class="text-sm text-muted">Payload chi tiết có thể xem qua API.</p></div></div>
+  <div class="table-wrap">
+    <table class="table">
+      <thead><tr><th>Cursor</th><th>Event</th><th>Thread</th><th>Account</th><th>Thời gian</th></tr></thead>
+      <tbody id="events-body">
+      {% for event in events %}
+        <tr><td class="font-mono">#{{ event.id }}</td><td><strong>{{ event.event_type }}</strong></td><td class="font-mono text-xs">{{ event.thread_id or '—' }}</td><td class="font-mono text-xs">{{ (event.account_id or '—')[:8] }}</td><td class="text-muted">{{ event.created_at.strftime('%H:%M:%S %d/%m') }}</td></tr>
+      {% else %}<tr><td colspan="5"><div class="empty">Chưa nhận event.</div></td></tr>{% endfor %}
+      </tbody>
+    </table>
+  </div>
+</section>
+{% endblock %}

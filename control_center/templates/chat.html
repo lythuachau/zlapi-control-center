@@ -1,0 +1,667 @@
+{% extends "base.html" %}
+
+{% block head %}
+  <link rel="stylesheet" href="{{ url_for('static', path='/css/chat.css') }}?v=20260730-group-polls">
+{% endblock %}
+
+{% block content %}
+<div
+  class="zchat theme-midnight"
+  id="zchat-app"
+  data-can-send="{{ 'true' if can_send else 'false' }}"
+  data-can-manage-jobs="{{ 'true' if can_manage_jobs else 'false' }}"
+  data-can-manage-reactions="{{ 'true' if can_manage_reactions else 'false' }}"
+  data-can-manage-groups="{{ 'true' if can_manage_groups else 'false' }}"
+  data-max-upload-mb="{{ max_upload_mb }}"
+>
+  <header class="zchat-topbar">
+    <a class="zchat-brand" href="/" aria-label="Trở về Control Center">
+      <span class="zchat-brand-mark">Z</span>
+      <span>
+        <strong>ZCHAT DESK</strong>
+        <small>Hội thoại Zalo realtime</small>
+      </span>
+    </a>
+
+    <div class="zchat-themes" aria-label="Chọn theme giao diện">
+      <button type="button" data-chat-theme="midnight" aria-pressed="true">
+        <i></i><span>Midnight</span>
+      </button>
+      <button type="button" data-chat-theme="daylight" aria-pressed="false">
+        <i></i><span>Daylight</span>
+      </button>
+      <button type="button" data-chat-theme="signal" aria-pressed="false">
+        <i></i><span>Signal Desk</span>
+      </button>
+    </div>
+
+    <div class="zchat-account-picker">
+      <span class="zchat-listener-state" id="chat-listener-state">
+        <i></i><span>Chưa chọn tài khoản</span>
+      </span>
+      <label>
+        <span class="sr-only">Tài khoản Zalo</span>
+        <select id="chat-account">
+          {% if accounts %}
+            {% for account in accounts %}
+            <option
+              value="{{ account.id }}"
+              data-name="{{ account.name }}"
+              data-status="{{ account.status }}"
+              data-listener="{{ 'true' if account.listener_enabled else 'false' }}"
+              data-zalo-uid="{{ account.zalo_uid or '' }}"
+            >
+              {{ account.name }}
+            </option>
+            {% endfor %}
+          {% else %}
+            <option value="">Chưa có tài khoản hoạt động</option>
+          {% endif %}
+        </select>
+      </label>
+      <a class="zchat-control-link" href="/" title="Mở Control Center">⌂</a>
+    </div>
+  </header>
+
+  <section class="zchat-workspace">
+    <aside class="zchat-rail" aria-label="Điều hướng ZChat">
+      <a class="zchat-rail-logo" href="/">Z</a>
+      <nav>
+        <button class="active" type="button" data-chat-nav="messages" aria-pressed="true">
+          <span>▣</span><small>Tin nhắn</small>
+        </button>
+        <button type="button" data-chat-nav="contacts" aria-pressed="false">
+          <span>◎</span><small>Danh bạ</small>
+        </button>
+        <button type="button" data-chat-nav="tasks" aria-pressed="false">
+          <span>⌁</span><small>Tác vụ</small>
+        </button>
+      </nav>
+      <span class="zchat-rail-spacer"></span>
+      <span class="zchat-live"><i></i>LIVE</span>
+      <a class="zchat-user-avatar" href="/profile" title="Tài khoản cá nhân" aria-label="Mở tài khoản cá nhân">{{ user.display_name[:2]|upper }}</a>
+    </aside>
+
+    <aside class="zchat-inbox">
+      <div class="zchat-inbox-heading">
+        <span>
+          <small>HỘP THƯ ZALO</small>
+          <strong id="chat-inbox-title">Hội thoại</strong>
+        </span>
+        <button type="button" id="chat-refresh" aria-label="Làm mới hội thoại">↻</button>
+      </div>
+
+      <label class="zchat-search">
+        <span>⌕</span>
+        <input id="chat-search" type="search" placeholder="Tìm tên hoặc nội dung…" autocomplete="off">
+      </label>
+
+      <div class="zchat-filters" role="tablist" aria-label="Lọc hội thoại">
+        <button class="active" type="button" data-chat-filter="all" role="tab" aria-selected="true">
+          Tất cả <span id="chat-count-all">0</span>
+        </button>
+        <button type="button" data-chat-filter="user" role="tab" aria-selected="false">
+          Cá nhân <span id="chat-count-user">0</span>
+        </button>
+        <button type="button" data-chat-filter="group" role="tab" aria-selected="false">
+          Nhóm <span id="chat-count-group">0</span>
+        </button>
+      </div>
+
+      <div class="zchat-conversations" id="chat-conversations">
+        <div class="zchat-list-loading">
+          <i></i><i></i><i></i>
+          <span>Đang đọc sự kiện Listener…</span>
+        </div>
+      </div>
+
+      <div class="zchat-contacts-panel" id="chat-contacts-panel" hidden>
+        <div class="zchat-contacts-toolbar">
+          <label class="zchat-search zchat-contacts-search">
+            <span>⌕</span>
+            <input
+              id="chat-contacts-search"
+              type="search"
+              placeholder="Tìm trong danh bạ…"
+              autocomplete="off"
+            >
+          </label>
+          <button
+            type="button"
+            id="chat-contacts-refresh"
+            aria-label="Đồng bộ danh bạ"
+            title="Đồng bộ danh bạ"
+          >↻</button>
+        </div>
+        <div class="zchat-contacts-status" id="chat-contacts-status">
+          Chưa đồng bộ danh bạ.
+        </div>
+        <div class="zchat-contacts-list" id="chat-contacts-list">
+          <div class="zchat-list-empty">Chọn đồng bộ để tải danh bạ Zalo.</div>
+        </div>
+      </div>
+
+      <div class="zchat-tasks-panel" id="chat-tasks-panel" hidden>
+        <div class="zchat-tasks-toolbar">
+          <label>
+            <span>Trạng thái</span>
+            <select id="chat-tasks-filter" aria-label="Lọc trạng thái tác vụ">
+              <option value="all">Tất cả</option>
+              <option value="queued">Đang chờ</option>
+              <option value="running">Đang chạy</option>
+              <option value="failed">Thất bại</option>
+              <option value="succeeded">Hoàn tất</option>
+              <option value="cancelled">Đã hủy</option>
+            </select>
+          </label>
+          <button
+            type="button"
+            id="chat-tasks-refresh"
+            aria-label="Làm mới tác vụ"
+            title="Làm mới tác vụ"
+          >↻</button>
+        </div>
+        <div class="zchat-tasks-status" id="chat-tasks-status">
+          Chọn tài khoản để xem tác vụ.
+        </div>
+        <div class="zchat-tasks-list" id="chat-tasks-list">
+          <div class="zchat-list-empty">Chưa tải danh sách tác vụ.</div>
+        </div>
+        <a class="zchat-tasks-history" href="/jobs">Mở toàn bộ lịch sử hệ thống ↗</a>
+      </div>
+
+      <div class="zchat-connection-card">
+        <span class="zchat-pulse"><i></i></span>
+        <span>
+          <strong id="chat-account-name">Chưa chọn tài khoản</strong>
+          <small id="chat-account-status">Listener chưa kết nối</small>
+        </span>
+        <b id="chat-signal">—</b>
+      </div>
+    </aside>
+
+    <section class="zchat-thread" aria-label="Nội dung hội thoại">
+      <header class="zchat-thread-header">
+        <div class="zchat-contact">
+          <span class="zchat-avatar coral" id="chat-contact-avatar">ZL</span>
+          <span>
+            <strong id="chat-contact-name">Chọn một hội thoại</strong>
+            <small id="chat-contact-state">Tin nhắn được đồng bộ từ Listener</small>
+          </span>
+        </div>
+        <div class="zchat-thread-actions">
+          <span id="chat-thread-type">ZALO</span>
+          <button type="button" id="chat-thread-info" aria-label="Thông tin hội thoại">•••</button>
+        </div>
+      </header>
+
+      <div class="zchat-message-stage">
+        <div class="zchat-messages" id="chat-messages">
+          <div class="zchat-empty">
+            <span>◌</span>
+            <strong>Chưa chọn hội thoại</strong>
+            <p>Chọn một cuộc trò chuyện bên trái để xem dữ liệu thật từ Listener.</p>
+          </div>
+        </div>
+        <button
+          class="zchat-scroll-fab zchat-unread-jump"
+          id="chat-unread-jump"
+          type="button"
+          aria-label="Xem lại tin chưa đọc"
+          hidden
+        >
+          <svg aria-hidden="true" viewBox="0 0 24 24">
+            <path d="m6 14 6-6 6 6"></path>
+            <path d="m6 20 6-6 6 6"></path>
+          </svg>
+          <span class="zchat-unread-count" id="chat-unread-count">0</span>
+        </button>
+        <button
+          class="zchat-scroll-fab zchat-latest-jump"
+          id="chat-latest-jump"
+          type="button"
+          aria-label="Cuộn xuống tin nhắn mới nhất"
+          hidden
+        >
+          <svg aria-hidden="true" viewBox="0 0 24 24">
+            <path d="m6 4 6 6 6-6"></path>
+            <path d="m6 10 6 6 6-6"></path>
+          </svg>
+        </button>
+      </div>
+
+      <div class="zchat-realtime-note" id="chat-realtime-note">
+        <i></i> Realtime qua SSE · gửi qua PostgreSQL job queue
+      </div>
+
+      <div class="zchat-suggestions" id="chat-suggestions">
+        <span>Trả lời nhanh</span>
+        <button type="button" data-chat-suggestion="Mình kiểm tra ngay nhé.">Mình kiểm tra ngay</button>
+        <button type="button" data-chat-suggestion="Cảm ơn bạn đã chờ ạ.">Cảm ơn bạn đã chờ</button>
+        <button type="button" data-chat-suggestion="Mình sẽ phản hồi bạn sớm nhất có thể.">Sẽ phản hồi sớm</button>
+      </div>
+
+      <form class="zchat-composer" id="chat-composer">
+        <div class="zchat-reply-preview" id="chat-reply-preview" hidden>
+          <span class="zchat-reply-accent"></span>
+          <span>
+            <small>Đang trả lời <b id="chat-reply-author">Tin nhắn</b></small>
+            <strong id="chat-reply-text"></strong>
+          </span>
+          <button type="button" id="chat-reply-cancel" aria-label="Hủy trả lời">×</button>
+        </div>
+        <div class="zchat-attachment-tray" id="chat-attachment-tray" hidden>
+          <div class="zchat-attachment-heading">
+            <span>
+              <strong id="chat-attachment-title">Tệp đính kèm</strong>
+              <small id="chat-attachment-status">Sẵn sàng tải lên</small>
+            </span>
+            <button type="button" id="chat-attachment-clear" aria-label="Bỏ tất cả tệp">Bỏ tất cả</button>
+          </div>
+          <div class="zchat-attachment-list" id="chat-attachment-list"></div>
+        </div>
+        <div class="zchat-compose-tools">
+          <button type="button" id="chat-attach-files" aria-label="Đính kèm tệp" title="Đính kèm tệp">＋</button>
+          <button type="button" id="chat-attach-images" aria-label="Gửi ảnh hoặc video" title="Gửi ảnh hoặc video">▧</button>
+          <input id="chat-file-input" type="file" multiple hidden>
+          <input id="chat-image-input" type="file" accept="image/*,video/*" multiple hidden>
+        </div>
+        <textarea
+          id="chat-draft"
+          rows="1"
+          maxlength="4000"
+          placeholder="Chọn hội thoại để bắt đầu…"
+          disabled
+        ></textarea>
+        <span class="zchat-character-count" id="chat-character-count">0/4000</span>
+        <button class="zchat-send" id="chat-send" type="submit" disabled>
+          Gửi <span>↗</span>
+        </button>
+      </form>
+    </section>
+
+    <aside class="zchat-details" id="chat-details">
+      <div class="zchat-profile">
+        <span class="zchat-avatar coral large" id="chat-profile-avatar">ZL</span>
+        <strong id="chat-profile-name">Chưa chọn hội thoại</strong>
+        <small id="chat-profile-kind">Zalo</small>
+      </div>
+
+      <div class="zchat-detail-section">
+        <span>THÔNG TIN KẾT NỐI</span>
+        <dl>
+          <div><dt>Tài khoản</dt><dd id="chat-detail-account">—</dd></div>
+          <div><dt>Thread ID</dt><dd id="chat-detail-thread">—</dd></div>
+          <div><dt>Loại</dt><dd id="chat-detail-type">—</dd></div>
+          <div id="chat-detail-members-row" hidden><dt>Thành viên</dt><dd id="chat-detail-members">—</dd></div>
+          <div><dt>Listener</dt><dd id="chat-detail-listener">—</dd></div>
+        </dl>
+      </div>
+
+      <section class="zchat-detail-section zchat-group-members" id="chat-group-members-panel" hidden>
+        <div class="zchat-group-members-heading">
+          <span>THÀNH VIÊN NHÓM</span>
+          <div class="zchat-group-members-heading-actions">
+            {% if can_manage_groups %}
+            <button class="zchat-inline-action" id="chat-group-manage-open" type="button">
+              Quản lý
+            </button>
+            {% endif %}
+            <button class="zchat-inline-action" id="chat-group-members-sync" type="button">
+              Đồng bộ
+            </button>
+          </div>
+        </div>
+        <p class="zchat-group-description" id="chat-group-description" hidden></p>
+        <label class="zchat-group-members-search">
+          <span aria-hidden="true">⌕</span>
+          <input id="chat-group-members-search" type="search" placeholder="Tìm thành viên…">
+        </label>
+        <small class="zchat-group-members-status" id="chat-group-members-status">
+          Chưa đồng bộ thành viên.
+        </small>
+        <div class="zchat-group-members-list" id="chat-group-members-list"></div>
+      </section>
+
+      <section class="zchat-detail-section zchat-group-pins" id="chat-group-pins-panel" hidden>
+        <div class="zchat-group-members-heading">
+          <span>TIN NHẮN ĐÃ GHIM</span>
+          <button class="zchat-inline-action" id="chat-group-pins-sync" type="button">
+            Đồng bộ
+          </button>
+        </div>
+        <small class="zchat-group-members-status" id="chat-group-pins-status">
+          Chưa đồng bộ tin nhắn đã ghim.
+        </small>
+        <div class="zchat-group-pins-list" id="chat-group-pins-list"></div>
+      </section>
+
+      <section class="zchat-detail-section zchat-group-notes" id="chat-group-notes-panel" hidden>
+        <div class="zchat-group-members-heading">
+          <span>GHI CHÚ NHÓM</span>
+          <button class="zchat-inline-action" id="chat-group-notes-sync" type="button">
+            Đồng bộ
+          </button>
+        </div>
+        <small class="zchat-group-members-status" id="chat-group-notes-status">
+          Chưa đồng bộ ghi chú nhóm.
+        </small>
+        <div class="zchat-group-notes-list" id="chat-group-notes-list"></div>
+      </section>
+
+      <section class="zchat-detail-section zchat-group-polls" id="chat-group-polls-panel" hidden>
+        <div class="zchat-group-members-heading">
+          <span>BÌNH CHỌN</span>
+          <button class="zchat-inline-action" id="chat-group-polls-sync" type="button">
+            Đồng bộ
+          </button>
+        </div>
+        <small class="zchat-group-members-status" id="chat-group-polls-status">
+          Chưa đồng bộ bình chọn nhóm.
+        </small>
+        <div class="zchat-group-polls-list" id="chat-group-polls-list"></div>
+      </section>
+
+      <div class="zchat-detail-section">
+        <span>TRẠNG THÁI HỘP THƯ</span>
+        <div class="zchat-health-card">
+          <i></i>
+          <strong id="chat-health-title">Đang kiểm tra</strong>
+          <small id="chat-health-copy">Chờ dữ liệu tài khoản.</small>
+        </div>
+      </div>
+
+      <div class="zchat-detail-section zchat-safety">
+        <span>AN TOÀN GỬI TIN</span>
+        <p>
+          Tin nhắn chỉ được xếp hàng khi tài khoản và Listener đang online.
+          Phiên lỗi sẽ bị chặn cho đến khi admin cập nhật cookie.
+        </p>
+      </div>
+    </aside>
+  </section>
+
+  {% if can_manage_groups %}
+  <dialog class="zchat-dialog zchat-group-manage-dialog" id="chat-group-manage-dialog">
+    <div class="zchat-dialog-shell">
+      <header>
+        <span>
+          <small>QUẢN LÝ NHÓM</small>
+          <strong id="chat-group-manage-title">Nhóm Zalo</strong>
+        </span>
+        <button type="button" data-dialog-close aria-label="Đóng">×</button>
+      </header>
+
+      <section class="zchat-group-manage-section">
+        <div class="zchat-group-manage-copy">
+          <strong>Đổi tên nhóm</strong>
+          <small>Chỉ chủ nhóm hoặc thành viên được Zalo cấp quyền mới thực hiện được.</small>
+        </div>
+        <label>
+          <span>Tên mới</span>
+          <input id="chat-group-new-name" maxlength="120" autocomplete="off">
+        </label>
+        <label>
+          <span>Nhập lại tên nhóm hiện tại để xác nhận</span>
+          <input id="chat-group-name-confirmation" maxlength="120" autocomplete="off">
+        </label>
+        <button class="primary" id="chat-group-rename-submit" type="button" disabled>
+          Xếp hàng đổi tên
+        </button>
+      </section>
+
+      <section class="zchat-group-manage-section">
+        <div class="zchat-group-manage-copy">
+          <strong>Mời thành viên từ danh bạ</strong>
+          <small>Chọn tối đa 50 người chưa có trong nhóm.</small>
+        </div>
+        <label class="zchat-dialog-search">
+          <span>⌕</span>
+          <input id="chat-group-invite-search" type="search" placeholder="Tìm trong danh bạ…">
+        </label>
+        <div class="zchat-group-invite-list" id="chat-group-invite-list"></div>
+      </section>
+
+      <footer>
+        <span id="chat-group-manage-status">Chưa chọn thành viên</span>
+        <button type="button" data-dialog-close>Đóng</button>
+        <button class="primary" id="chat-group-invite-submit" type="button" disabled>
+          Mời vào nhóm
+        </button>
+      </footer>
+    </div>
+  </dialog>
+  {% endif %}
+
+  <div
+    class="zchat-reaction-picker"
+    id="chat-reaction-picker"
+    role="dialog"
+    aria-label="Chọn reaction"
+    hidden
+  >
+    <div class="zchat-reaction-quick" id="chat-reaction-quick"></div>
+    <button
+      class="zchat-reaction-more"
+      id="chat-reaction-more"
+      type="button"
+      aria-label="Mở toàn bộ reaction"
+    >＋</button>
+    <div class="zchat-reaction-all" id="chat-reaction-all" hidden></div>
+    <button
+      class="zchat-reaction-manage-open"
+      id="chat-reaction-manage-open"
+      type="button"
+      hidden
+    >Tùy chỉnh thư viện</button>
+  </div>
+
+  <div class="zchat-message-menu" id="chat-message-menu" role="menu" hidden>
+    <button type="button" data-message-menu-action="copy" role="menuitem">Sao chép nội dung</button>
+    <button type="button" data-message-menu-action="download" role="menuitem">Tải tệp / media</button>
+    <button type="button" data-message-menu-action="details" role="menuitem">Xem chi tiết</button>
+    <button class="danger" type="button" data-message-menu-action="undo" role="menuitem">
+      Thu hồi tin nhắn
+    </button>
+  </div>
+
+  <dialog class="zchat-dialog zchat-forward-dialog" id="chat-forward-dialog">
+    <form method="dialog" class="zchat-dialog-shell">
+      <header>
+        <span>
+          <small>CHIA SẺ TIN NHẮN</small>
+          <strong>Chọn hội thoại nhận</strong>
+        </span>
+        <button value="cancel" aria-label="Đóng">×</button>
+      </header>
+      <div class="zchat-forward-preview" id="chat-forward-preview"></div>
+      <label class="zchat-dialog-search">
+        <span>⌕</span>
+        <input id="chat-forward-search" type="search" placeholder="Tìm cá nhân hoặc nhóm…">
+      </label>
+      <div class="zchat-forward-list" id="chat-forward-list"></div>
+      <footer>
+        <span id="chat-forward-count">Chưa chọn hội thoại</span>
+        <button type="button" value="cancel" data-dialog-close>Hủy</button>
+        <button class="primary" id="chat-forward-submit" type="button" disabled>
+          Chia sẻ
+        </button>
+      </footer>
+    </form>
+  </dialog>
+
+  <dialog class="zchat-dialog zchat-details-dialog" id="chat-message-details-dialog">
+    <form method="dialog" class="zchat-dialog-shell compact">
+      <header>
+        <span>
+          <small>THÔNG TIN TIN NHẮN</small>
+          <strong>Chi tiết kỹ thuật</strong>
+        </span>
+        <button value="cancel" aria-label="Đóng">×</button>
+      </header>
+      <dl class="zchat-message-details" id="chat-message-details"></dl>
+      <footer>
+        <button class="primary" value="cancel">Đóng</button>
+      </footer>
+    </form>
+  </dialog>
+
+  <dialog class="zchat-dialog zchat-details-dialog zchat-pin-details-dialog" id="chat-group-pin-details-dialog">
+    <form method="dialog" class="zchat-dialog-shell compact">
+      <header>
+        <span>
+          <small>TIN NHẮN ĐÃ GHIM</small>
+          <strong>Chi tiết tin nhắn</strong>
+        </span>
+        <button value="cancel" aria-label="Đóng">×</button>
+      </header>
+      <div class="zchat-pin-detail-preview" id="chat-group-pin-detail-preview"></div>
+      <dl class="zchat-message-details" id="chat-group-pin-details"></dl>
+      <footer>
+        <button type="button" value="cancel" data-dialog-close>Đóng</button>
+        <button class="primary" type="button" id="chat-group-pin-open-message">
+          Mở trong hội thoại
+        </button>
+      </footer>
+    </form>
+  </dialog>
+
+  <dialog class="zchat-dialog zchat-details-dialog zchat-note-details-dialog" id="chat-group-note-details-dialog">
+    <form method="dialog" class="zchat-dialog-shell compact">
+      <header>
+        <span>
+          <small>GHI CHÚ NHÓM</small>
+          <strong>Chi tiết ghi chú</strong>
+        </span>
+        <button value="cancel" aria-label="Đóng">×</button>
+      </header>
+      <div class="zchat-note-detail-content" id="chat-group-note-detail-content"></div>
+      <dl class="zchat-message-details" id="chat-group-note-details"></dl>
+      <footer>
+        <button class="primary" value="cancel">Đóng</button>
+      </footer>
+    </form>
+  </dialog>
+
+  <dialog class="zchat-dialog zchat-details-dialog zchat-poll-details-dialog" id="chat-group-poll-details-dialog">
+    <form method="dialog" class="zchat-dialog-shell compact">
+      <header>
+        <span>
+          <small>BÌNH CHỌN NHÓM</small>
+          <strong>Chi tiết và kết quả</strong>
+        </span>
+        <button value="cancel" aria-label="Đóng">×</button>
+      </header>
+      <div class="zchat-poll-detail-heading">
+        <span class="zchat-poll-icon">VOTE</span>
+        <strong id="chat-group-poll-detail-question">Bình chọn trong nhóm</strong>
+      </div>
+      <small class="zchat-poll-detail-status" id="chat-group-poll-detail-status">
+        Chỉ đọc · Chưa tải kết quả mới
+      </small>
+      <div class="zchat-poll-detail-options" id="chat-group-poll-detail-options"></div>
+      <dl class="zchat-message-details" id="chat-group-poll-details"></dl>
+      <footer>
+        <button class="primary" value="cancel">Đóng</button>
+      </footer>
+    </form>
+  </dialog>
+
+  <dialog class="zchat-dialog zchat-details-dialog" id="chat-task-details-dialog">
+    <form method="dialog" class="zchat-dialog-shell compact">
+      <header>
+        <span>
+          <small>CHI TIẾT TÁC VỤ</small>
+          <strong id="chat-task-details-title">Tác vụ ZChat</strong>
+        </span>
+        <button value="cancel" aria-label="Đóng">×</button>
+      </header>
+      <dl class="zchat-message-details" id="chat-task-details"></dl>
+      <footer>
+        <button class="primary" value="cancel">Đóng</button>
+      </footer>
+    </form>
+  </dialog>
+
+  <dialog class="zchat-dialog zchat-reaction-manager" id="chat-reaction-manager">
+    <form method="dialog" class="zchat-dialog-shell wide">
+      <header>
+        <span>
+          <small>THƯ VIỆN REACTION</small>
+          <strong>Tùy chỉnh icon và danh sách nhanh</strong>
+        </span>
+        <button value="cancel" aria-label="Đóng">×</button>
+      </header>
+      <div class="zchat-reaction-manager-grid">
+        <section>
+          <div class="zchat-manager-heading">
+            <strong>Reaction đang dùng</strong>
+            <small>Tối đa 8 icon trong thanh chọn nhanh</small>
+          </div>
+          <div class="zchat-catalog-list" id="chat-reaction-catalog-list"></div>
+        </section>
+        <section>
+          <div class="zchat-manager-heading">
+            <strong>Thêm reaction tùy chỉnh</strong>
+            <small>Reaction thử nghiệm cần đúng mã Zalo; reaction nội bộ luôn khả dụng.</small>
+          </div>
+          <div class="zchat-custom-reaction-form">
+            <label>
+              <span>Icon</span>
+              <input id="chat-custom-reaction-glyph" maxlength="16" placeholder="🔥">
+            </label>
+            <label>
+              <span>Tên hiển thị</span>
+              <input id="chat-custom-reaction-label" maxlength="60" placeholder="Tuyệt vời">
+            </label>
+            <label>
+              <span>Chế độ</span>
+              <select id="chat-custom-reaction-mode">
+                <option value="experimental">Thử nghiệm trên Zalo</option>
+                <option value="local">Chỉ ZChat</option>
+              </select>
+            </label>
+            <label>
+              <span>Mã icon Zalo</span>
+              <input id="chat-custom-reaction-zalo-icon" maxlength="32" placeholder="/-custom hoặc emoji">
+            </label>
+            <label>
+              <span>Reaction type</span>
+              <input id="chat-custom-reaction-type" type="number" min="-1" max="10000" value="-1">
+            </label>
+            <label>
+              <span>Khi Zalo từ chối</span>
+              <select id="chat-custom-reaction-fallback">
+                <option value="none">Báo lỗi</option>
+                <option value="message">Gửi thành tin nhắn emoji</option>
+                <option value="local">Giữ reaction trong ZChat</option>
+              </select>
+            </label>
+            <label class="checkbox">
+              <input id="chat-custom-reaction-quick" type="checkbox">
+              <span>Đưa vào thanh reaction nhanh</span>
+            </label>
+            <button class="primary" id="chat-custom-reaction-add" type="button">
+              Thêm vào thư viện
+            </button>
+            <button id="chat-custom-reaction-test" type="button">
+              Lưu và dùng thử trên tin đang chọn
+            </button>
+          </div>
+        </section>
+      </div>
+      <footer>
+        <span id="chat-reaction-manager-status">Thay đổi chỉ có hiệu lực sau khi lưu.</span>
+        <button type="button" value="cancel" data-dialog-close>Hủy</button>
+        <button class="primary" id="chat-reaction-catalog-save" type="button">
+          Lưu thư viện
+        </button>
+      </footer>
+    </form>
+  </dialog>
+</div>
+{% endblock %}
+
+{% block scripts %}
+  <script defer src="{{ url_for('static', path='/js/chat.js') }}?v=20260730-group-polls"></script>
+{% endblock %}

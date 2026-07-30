@@ -1,0 +1,82 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="mb-6 flex flex-wrap items-end justify-between gap-4">
+  <div><h2 class="text-2xl font-bold tracking-tight">Phiên Zalo</h2><p class="mt-1 text-sm text-muted">Cookie và IMEI luôn được mã hóa trước khi lưu.</p></div>
+  {% if user.role in ['admin', 'super_admin'] %}<button class="btn-primary" data-open-modal="account-modal">+ Thêm tài khoản</button>{% endif %}
+</div>
+
+<section class="panel">
+  {% if accounts %}
+  <div class="table-wrap">
+    <table class="table">
+      <thead><tr><th>Tài khoản</th><th>Zalo UID</th><th>Listener</th><th>Trạng thái</th><th>Lần cuối</th><th></th></tr></thead>
+      <tbody>
+        {% for account in accounts %}
+        <tr>
+          <td><strong>{{ account.name }}</strong><small class="block text-muted">{{ account.id[:8] }}</small></td>
+          <td class="font-mono text-xs">{{ account.zalo_uid or 'Chưa xác định' }}</td>
+          <td><span class="badge-{{ 'online' if account.listener_enabled else 'offline' }}"><span class="dot"></span>{{ 'Bật' if account.listener_enabled else 'Tắt' }}</span>{% if account.status == 'error' and not account.listener_enabled %}<small class="mt-1 block text-amber-500">Chờ admin cập nhật phiên</small>{% endif %}</td>
+          <td><span class="badge-{{ account.status }}"><span class="dot"></span>{{ account.status }}</span>{% if account.last_error %}<small class="mt-1 block max-w-xs truncate text-rose-500">{{ account.last_error }}</small>{% endif %}</td>
+          <td class="text-muted">{{ account.last_seen_at.strftime('%H:%M %d/%m') if account.last_seen_at else '—' }}</td>
+          <td class="text-right">
+            <div class="flex flex-wrap justify-end gap-2">
+              <button class="btn-secondary py-2" data-test-account="{{ account.id }}">Kiểm tra</button>
+              {% if user.role in ['admin', 'super_admin'] %}
+              <button class="btn-secondary py-2" data-update-account="{{ account.id }}" data-update-account-name="{{ account.name }}">Cập nhật phiên</button>
+              <button class="btn-secondary py-2" data-toggle-listener="{{ account.id }}" data-listener-state="{{ 'false' if account.listener_enabled else 'true' }}">{{ 'Tắt listener' if account.listener_enabled else 'Bật listener' }}</button>
+              <button class="btn-danger py-2" data-delete-account="{{ account.id }}" data-delete-account-name="{{ account.name }}">Xóa tài khoản</button>
+              {% endif %}
+            </div>
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% else %}<div class="empty"><div><p class="text-lg font-semibold text-main">Chưa có tài khoản</p><p class="mt-1">Thêm cookie và IMEI để bắt đầu.</p></div></div>{% endif %}
+</section>
+{% endblock %}
+
+{% block modals %}
+<div class="modal-backdrop" id="account-modal" role="dialog" aria-modal="true" aria-labelledby="account-modal-title">
+  <section class="modal">
+    <div class="panel-header"><div><h2 id="account-modal-title" class="font-semibold">Thêm tài khoản Zalo</h2><p class="text-sm text-muted">Thông tin phiên được mã hóa AES-256-GCM.</p></div><button class="icon-btn" data-close-modal type="button">×</button></div>
+    <form id="account-form" class="space-y-5 p-5">
+      <div class="grid gap-5 sm:grid-cols-2">
+        <div class="field"><label for="account-name">Tên gợi nhớ</label><input class="input" id="account-name" name="name" required maxlength="120" placeholder="CSKH Miền Nam"></div>
+        <div class="field"><label for="account-imei">IMEI</label><input class="input" id="account-imei" name="imei" required autocomplete="off"></div>
+      </div>
+      <div class="field"><label for="account-cookies">Giá trị cookie <code>zpw_sek</code></label><input class="input font-mono text-xs" id="account-cookies" name="cookies" type="password" required autocomplete="off" spellcheck="false" placeholder="Dán giá trị nằm sau zpw_sek="><p class="mt-1.5 text-xs text-muted">Chỉ cần dán phần giá trị cookie. Hệ thống sẽ tự tạo <code>{"zpw_sek":"GIÁ_TRỊ_COOKIE"}</code>. JSON hoặc chuỗi Cookie đầy đủ vẫn được hỗ trợ.</p></div>
+      <div class="field"><label for="account-agent">User-Agent <span class="text-muted">(không bắt buộc)</span></label><input class="input" id="account-agent" name="user_agent"></div>
+      <label class="flex items-center gap-3 rounded-xl border p-4"><input type="checkbox" name="listener_enabled" class="h-4 w-4 accent-teal-500"><span><strong class="block text-sm">Bật listener sau khi kiểm tra</strong><small class="text-muted">Service sẽ tự kết nối khi phiên hợp lệ.</small></span></label>
+      <div class="flex justify-end gap-3"><button class="btn-secondary" data-close-modal type="button">Hủy</button><button class="btn-primary" type="submit">Lưu tài khoản</button></div>
+    </form>
+  </section>
+</div>
+
+<div class="modal-backdrop" id="session-modal" role="dialog" aria-modal="true" aria-labelledby="session-modal-title">
+  <section class="modal">
+    <div class="panel-header"><div><h2 id="session-modal-title" class="font-semibold">Cập nhật phiên Zalo</h2><p class="text-sm text-muted">Tài khoản: <strong id="session-account-name" class="text-main"></strong></p></div><button class="icon-btn" data-close-modal type="button">×</button></div>
+    <form id="session-form" class="space-y-5 p-5">
+      <input id="session-account-id" name="account_id" type="hidden">
+      <div class="field"><label for="session-cookies">Giá trị cookie <code>zpw_sek</code></label><input class="input font-mono text-xs" id="session-cookies" name="cookies" type="password" required autocomplete="off" spellcheck="false" placeholder="Dán giá trị cookie mới"><p class="mt-1.5 text-xs text-muted">Hệ thống tự chuyển thành <code>{"zpw_sek":"GIÁ_TRỊ_COOKIE"}</code> và không tự bật lại listener.</p></div>
+      <div class="field"><label for="session-imei">IMEI mới <span class="text-muted">(để trống nếu không đổi)</span></label><input class="input" id="session-imei" name="imei" autocomplete="off"></div>
+      <div class="rounded-xl border border-amber-500/30 bg-amber-500/10 p-4 text-sm text-amber-600">Sau khi cập nhật, hãy bấm <strong>Kiểm tra</strong>. Chỉ bật lại listener khi tài khoản đã online.</div>
+      <div class="flex justify-end gap-3"><button class="btn-secondary" data-close-modal type="button">Hủy</button><button class="btn-primary" type="submit">Lưu phiên mới</button></div>
+    </form>
+  </section>
+</div>
+
+<div class="modal-backdrop" id="delete-account-modal" role="dialog" aria-modal="true" aria-labelledby="delete-account-modal-title">
+  <section class="modal">
+    <div class="panel-header"><div><h2 id="delete-account-modal-title" class="font-semibold text-rose-500">Xóa tài khoản Zalo</h2><p class="text-sm text-muted">Tài khoản: <strong id="delete-account-name" class="text-main"></strong></p></div><button class="icon-btn" data-close-modal type="button">×</button></div>
+    <form id="delete-account-form" class="space-y-5 p-5">
+      <input id="delete-account-id" name="account_id" type="hidden">
+      <div class="rounded-xl border border-rose-500/30 bg-rose-500/10 p-4 text-sm text-rose-500">Cookie và IMEI sẽ bị xóa vĩnh viễn. Job đang chờ sẽ bị hủy; lịch sử job, event và audit vẫn được giữ.</div>
+      <div class="field"><label for="delete-account-confirmation">Nhập chính xác tên tài khoản để xác nhận</label><input class="input" id="delete-account-confirmation" name="confirmation" required autocomplete="off" spellcheck="false"></div>
+      <label class="flex items-start gap-3 rounded-xl border p-4"><input id="delete-account-final" name="final_confirmation" type="checkbox" required class="mt-1 h-4 w-4 accent-teal-500"><span><strong class="block text-sm">Tôi hiểu thao tác này không thể hoàn tác</strong><small class="text-muted">Đây là bước xác nhận cuối cùng trước khi xóa.</small></span></label>
+      <div class="flex justify-end gap-3"><button class="btn-secondary" data-close-modal type="button">Hủy</button><button class="btn-danger" type="submit">Xóa vĩnh viễn</button></div>
+    </form>
+  </section>
+</div>
+{% endblock %}

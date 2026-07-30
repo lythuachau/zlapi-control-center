@@ -1,0 +1,109 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    color-scheme: light;
+    --canvas: 244 247 251;
+    --surface: 255 255 255;
+    --surface-muted: 241 245 249;
+    --line: 226 232 240;
+    --ink: 15 23 42;
+    --muted: 100 116 139;
+    --brand: 13 148 136;
+    --brand-strong: 15 118 110;
+    --accent: 6 182 212;
+  }
+  [data-theme="dark"] {
+    color-scheme: dark;
+    --canvas: 5 10 20;
+    --surface: 11 18 32;
+    --surface-muted: 16 26 43;
+    --line: 35 49 71;
+    --ink: 226 232 240;
+    --muted: 148 163 184;
+    --brand: 45 212 191;
+    --brand-strong: 20 184 166;
+    --accent: 34 211 238;
+  }
+  * { @apply border-[rgb(var(--line))]; }
+  body {
+    @apply min-h-screen font-sans antialiased;
+    background: rgb(var(--canvas));
+    color: rgb(var(--ink));
+  }
+  input, select, textarea {
+    color: rgb(var(--ink));
+    background: rgb(var(--surface));
+  }
+}
+
+@layer components {
+  .surface { background: rgb(var(--surface)); }
+  .surface-muted { background: rgb(var(--surface-muted)); }
+  .text-main { color: rgb(var(--ink)); }
+  .text-muted { color: rgb(var(--muted)); }
+  .brand { color: rgb(var(--brand)); }
+  .app-shell { @apply min-h-screen lg:grid lg:grid-cols-[260px_1fr]; }
+  .sidebar {
+    @apply fixed inset-y-0 left-0 z-40 w-[260px] -translate-x-full border-r p-4 transition-transform lg:translate-x-0;
+    background: rgb(var(--surface));
+  }
+  .sidebar.open { @apply translate-x-0; }
+  .nav-link {
+    @apply flex items-center gap-3 rounded-xl px-3 py-2.5 text-sm font-medium transition;
+    color: rgb(var(--muted));
+  }
+  .nav-link:hover { background: rgb(var(--surface-muted)); color: rgb(var(--ink)); }
+  .nav-link.active {
+    color: rgb(var(--brand-strong));
+    background: rgb(var(--brand) / .12);
+  }
+  .nav-icon { @apply grid h-8 w-8 place-items-center rounded-lg text-xs font-bold; background: rgb(var(--surface-muted)); }
+  .page { @apply min-w-0 lg:col-start-2; }
+  .topbar {
+    @apply sticky top-0 z-30 flex h-16 items-center justify-between border-b px-4 backdrop-blur-xl sm:px-6 lg:px-8;
+    background: rgb(var(--surface) / .84);
+  }
+  .content { @apply mx-auto max-w-[1500px] p-4 sm:p-6 lg:p-8; }
+  .panel {
+    @apply rounded-2xl border shadow-panel;
+    background: rgb(var(--surface));
+  }
+  .panel-header { @apply flex flex-wrap items-center justify-between gap-3 border-b px-5 py-4; }
+  .metric { @apply panel overflow-hidden p-5; }
+  .metric-label { @apply text-sm font-medium; color: rgb(var(--muted)); }
+  .metric-value { @apply mt-3 text-3xl font-semibold tracking-tight; }
+  .btn {
+    @apply inline-flex items-center justify-center gap-2 rounded-xl px-4 py-2.5 text-sm font-semibold transition disabled:cursor-not-allowed disabled:opacity-50;
+  }
+  .btn-primary { @apply btn text-white; background: rgb(var(--brand-strong)); }
+  .btn-primary:hover { filter: brightness(1.08); }
+  .btn-secondary { @apply btn border; background: rgb(var(--surface)); }
+  .btn-secondary:hover { background: rgb(var(--surface-muted)); }
+  .btn-danger { @apply btn bg-rose-600 text-white hover:bg-rose-500; }
+  .icon-btn { @apply grid h-10 w-10 place-items-center rounded-xl border transition; background: rgb(var(--surface)); }
+  .icon-btn:hover { background: rgb(var(--surface-muted)); }
+  .field { @apply space-y-1.5; }
+  .field label { @apply text-sm font-medium; }
+  .input { @apply w-full rounded-xl border px-3.5 py-2.5 text-sm outline-none transition focus:border-teal-500 focus:ring-4 focus:ring-teal-500/10; }
+  .table-wrap { @apply overflow-x-auto; }
+  .table { @apply w-full min-w-[720px] text-left text-sm; }
+  .table th { @apply border-b px-5 py-3 text-xs font-semibold uppercase tracking-wider; color: rgb(var(--muted)); background: rgb(var(--surface-muted)); }
+  .table td { @apply border-b px-5 py-4 align-middle; }
+  .table tbody tr:hover { background: rgb(var(--surface-muted) / .65); }
+  .badge { @apply inline-flex items-center gap-1.5 rounded-full px-2.5 py-1 text-xs font-semibold; }
+  .badge-ready, .badge-online, .badge-succeeded { @apply badge bg-emerald-500/10 text-emerald-600 dark:text-emerald-400; }
+  .badge-unstable, .badge-queued, .badge-unchecked { @apply badge bg-amber-500/10 text-amber-600 dark:text-amber-400; }
+  .badge-unsupported, .badge-failed, .badge-error { @apply badge bg-rose-500/10 text-rose-600 dark:text-rose-400; }
+  .badge-running { @apply badge bg-cyan-500/10 text-cyan-600 dark:text-cyan-400; }
+  .badge-cancelled, .badge-offline { @apply badge bg-slate-500/10 text-slate-500; }
+  .dot { @apply h-1.5 w-1.5 rounded-full bg-current; }
+  .modal-backdrop { @apply fixed inset-0 z-50 hidden items-center justify-center bg-slate-950/60 p-4 backdrop-blur-sm; }
+  .modal-backdrop.open { @apply flex; }
+  .modal { @apply panel max-h-[90vh] w-full max-w-2xl overflow-y-auto; }
+  .toast { @apply pointer-events-auto flex w-full max-w-sm items-start gap-3 rounded-2xl border p-4 shadow-2xl; background: rgb(var(--surface)); }
+  .codebox { @apply overflow-auto rounded-xl border p-4 font-mono text-xs leading-6; background: rgb(var(--surface-muted)); }
+  .empty { @apply grid min-h-44 place-items-center p-8 text-center; color: rgb(var(--muted)); }
+}

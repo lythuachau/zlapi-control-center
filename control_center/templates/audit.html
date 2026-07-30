@@ -1,0 +1,8 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="mb-6"><h2 class="text-2xl font-bold tracking-tight">Dấu vết bất biến</h2><p class="mt-1 text-sm text-muted">Mọi thay đổi quyền, tài khoản, key và job đều được ghi lại.</p></div>
+<section class="panel"><div class="table-wrap"><table class="table"><thead><tr><th>ID</th><th>Action</th><th>Actor</th><th>Resource</th><th>IP</th><th>Thời gian</th></tr></thead><tbody>
+{% for entry in entries %}<tr><td class="font-mono">#{{ entry.id }}</td><td><strong>{{ entry.action }}</strong></td><td><span class="badge-running">{{ entry.actor_type }}</span><small class="ml-2 font-mono text-muted">{{ (entry.actor_id or 'system')[:8] }}</small></td><td>{{ entry.resource_type }}<small class="block font-mono text-muted">{{ (entry.resource_id or '—')[:12] }}</small></td><td class="font-mono text-xs">{{ entry.ip_address or '—' }}</td><td class="text-muted">{{ entry.created_at.strftime('%H:%M:%S %d/%m/%Y') }}</td></tr>
+{% else %}<tr><td colspan="6"><div class="empty">Chưa có audit event.</div></td></tr>{% endfor %}
+</tbody></table></div></section>
+{% endblock %}

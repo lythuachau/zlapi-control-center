@@ -120,7 +120,7 @@ class MessageReaction:
 		self.msgId = messageObject.msgId
 		self.cliMsgId = messageObject.cliMsgId
 		self.msgType = _util.getClientMessageType(messageObject.msgType)
-		if not isinstance(msgType, int):
+		if not isinstance(self.msgType, int):
 			raise ValueError("Msg Type must be int")
 		
 		if auto_format:

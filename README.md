@@ -1,3 +1,5 @@
+> **ZLAPI Control Center:** Repository này đã được mở rộng với FastAPI, PostgreSQL queue, RBAC, API keys, realtime events, giao diện quản trị và triển khai Windows Service. Xem [hướng dẫn Windows Server](docs/WINDOWS_DEPLOYMENT.md) và [hướng dẫn phát triển](docs/DEVELOPMENT.md).
+
 ![Logo](https://i.imgur.com/CMnA5Sh.jpeg "Logo")
 
 ## ``zlapi`` - Zalo API (Unofficial) for Python

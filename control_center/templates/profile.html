@@ -1,0 +1,104 @@
+{% extends "base.html" %}
+
+{% block content %}
+<div class="mx-auto grid max-w-5xl gap-6 lg:grid-cols-[minmax(0,1.15fr)_minmax(260px,.85fr)]">
+  <section class="panel p-6 sm:p-8">
+    <div class="mb-7">
+      <p class="text-xs font-bold uppercase tracking-[.18em] text-teal-500">Bảo mật tài khoản</p>
+      <h2 class="mt-2 text-2xl font-bold tracking-tight">Đổi mật khẩu</h2>
+      <p class="mt-2 max-w-xl text-sm leading-6 text-muted">
+        Nhập mật khẩu hiện tại để xác minh. Sau khi đổi thành công, phiên này sẽ đăng xuất và bạn cần đăng nhập lại.
+      </p>
+    </div>
+
+    <form id="password-change-form" class="space-y-5" novalidate>
+      <div class="field">
+        <label for="current-password">Mật khẩu hiện tại</label>
+        <input
+          class="input"
+          id="current-password"
+          name="current_password"
+          type="password"
+          autocomplete="current-password"
+          maxlength="256"
+          required
+        >
+      </div>
+
+      <div class="field">
+        <label for="new-password">Mật khẩu mới</label>
+        <input
+          class="input"
+          id="new-password"
+          name="new_password"
+          type="password"
+          autocomplete="new-password"
+          minlength="12"
+          maxlength="256"
+          aria-describedby="password-guidance"
+          required
+        >
+      </div>
+
+      <div class="field">
+        <label for="confirm-password">Nhập lại mật khẩu mới</label>
+        <input
+          class="input"
+          id="confirm-password"
+          name="confirm_password"
+          type="password"
+          autocomplete="new-password"
+          minlength="12"
+          maxlength="256"
+          required
+        >
+      </div>
+
+      <div id="password-guidance" class="rounded-2xl border p-4 surface-muted">
+        <p class="text-sm font-semibold">Yêu cầu mật khẩu</p>
+        <ul class="mt-2 space-y-1 text-xs leading-5 text-muted">
+          <li>• Tối thiểu 12 ký tự.</li>
+          <li>• Có ít nhất 3 nhóm: chữ thường, chữ hoa, số, ký tự đặc biệt.</li>
+          <li>• Khác mật khẩu hiện tại.</li>
+        </ul>
+      </div>
+
+      <button class="btn-primary w-full justify-center py-3 sm:w-auto sm:px-8" id="password-change-submit" type="submit">
+        Đổi mật khẩu
+      </button>
+    </form>
+  </section>
+
+  <aside class="space-y-6">
+    <section class="panel p-6">
+      <p class="text-xs font-bold uppercase tracking-[.18em] text-muted">Tài khoản đang đăng nhập</p>
+      <div class="mt-5 flex items-center gap-4">
+        <span class="grid h-14 w-14 place-items-center rounded-2xl bg-gradient-to-br from-teal-500 to-cyan-500 text-lg font-black text-white shadow-lg shadow-teal-500/20">
+          {{ user.display_name[:2]|upper }}
+        </span>
+        <span class="min-w-0">
+          <strong class="block truncate text-lg">{{ user.display_name }}</strong>
+          <span class="block truncate text-sm text-muted">@{{ user.username }}</span>
+        </span>
+      </div>
+      <dl class="mt-6 space-y-3 border-t pt-5 text-sm">
+        <div class="flex items-center justify-between gap-4">
+          <dt class="text-muted">Vai trò</dt>
+          <dd class="font-semibold">{{ role_label }}</dd>
+        </div>
+        <div class="flex items-center justify-between gap-4">
+          <dt class="text-muted">Trạng thái</dt>
+          <dd class="font-semibold text-emerald-500">Đang hoạt động</dd>
+        </div>
+      </dl>
+    </section>
+
+    <section class="rounded-2xl border border-amber-500/25 bg-amber-500/10 p-5">
+      <p class="font-semibold text-amber-500">Lưu ý bảo mật</p>
+      <p class="mt-2 text-sm leading-6 text-muted">
+        Không dùng lại mật khẩu ở dịch vụ khác và không chia sẻ mật khẩu qua tin nhắn.
+      </p>
+    </section>
+  </aside>
+</div>
+{% endblock %}
