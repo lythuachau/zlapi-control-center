@@ -66,6 +66,7 @@ from .profiles import (
     backfill_friend_profiles,
     cached_profiles,
     normalize_profiles,
+    profile_ids_needing_refresh,
     profile_initials,
     profile_records,
 )
@@ -2593,19 +2594,12 @@ def sync_chat_profiles(
         for user_id in body.user_ids
         if user_id != account.zalo_uid
     ]
-    cached_ids = set(
-        session.scalars(
-            select(ZaloContactProfile.user_id).where(
-                ZaloContactProfile.account_id == account.id,
-                ZaloContactProfile.user_id.in_(tuple(requested_ids)),
-            )
-        ).all()
-    ) if requested_ids else set()
-    missing_ids = [
-        user_id
-        for user_id in requested_ids
-        if user_id not in cached_ids
-    ]
+    missing_ids = profile_ids_needing_refresh(
+        session,
+        account_id=account.id,
+        user_ids=requested_ids,
+        account_uid=account.zalo_uid,
+    )
     if not missing_ids:
         return {
             "job_id": None,

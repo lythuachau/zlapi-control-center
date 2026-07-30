@@ -2091,12 +2091,11 @@
     }
   }
 
-  async function syncMissingProfiles(conversations) {
+  async function queueProfileSync(candidateIds) {
     if (!state.accountId || !accountIsReady()) return;
     const userIds = [...new Set(
-      (Array.isArray(conversations) ? conversations : [])
-        .filter((item) => item.thread_type === "user" && !item.profile_cached)
-        .map((item) => String(item.thread_id || "").trim())
+      (Array.isArray(candidateIds) ? candidateIds : [])
+        .map((userId) => String(userId || "").trim())
         .filter((userId) => userId && !state.profileSyncKeys.has(userId)),
     )].slice(0, 100);
     if (!userIds.length) return;
@@ -2113,6 +2112,27 @@
       userIds.forEach((userId) => state.profileSyncKeys.delete(userId));
       console.warn("Không thể đồng bộ hồ sơ Zalo", error);
     }
+  }
+
+  async function syncMissingProfiles(conversations) {
+    const userIds = (Array.isArray(conversations) ? conversations : [])
+      .filter((item) => (
+        item.thread_type === "user"
+        && (!item.profile_cached || !item.avatar_url)
+      ))
+      .map((item) => item.thread_id);
+    await queueProfileSync(userIds);
+  }
+
+  async function syncMissingMessageProfiles(messages) {
+    const userIds = (Array.isArray(messages) ? messages : [])
+      .filter((message) => (
+        !message.mine
+        && message.author_id
+        && !message.author_avatar_url
+      ))
+      .map((message) => message.author_id);
+    await queueProfileSync(userIds);
   }
 
   function formatBytes(value) {
@@ -2768,6 +2788,7 @@
         anchor,
         targetEventId: aroundEventId,
       });
+      void syncMissingMessageProfiles(messages);
     } catch (error) {
       toast(error.message, "error");
     } finally {
@@ -4316,6 +4337,7 @@
     if (empty) messagesNode.replaceChildren();
     state.messages.push(message);
     messagesNode.append(renderMessage(message));
+    void syncMissingMessageProfiles([message]);
     scrollMessages();
   }
 

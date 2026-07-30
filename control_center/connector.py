@@ -18,7 +18,7 @@ from .catalog import ActionSpec, get_action
 from .config import Settings
 from .media import gif_library_media_url, outbound_media_url, validate_media_kind
 from .models import GifLibraryItem, MediaUpload, ZaloAccount, utcnow
-from .profiles import cache_profiles
+from .profiles import cache_profiles, canonical_profile_user_id
 from .security import SecretBox, is_expired, safe_child_path
 from .video import VideoMetadata, generate_video_thumbnail, probe_video
 
@@ -756,6 +756,10 @@ class ZaloConnector:
                 for fallback_id, item in _profile_records(profile_response):
                     profile = _compact_member_profile(item, fallback_id)
                     if profile:
+                        profile["user_id"] = canonical_profile_user_id(
+                            profile["user_id"],
+                            chunk,
+                        )
                         profiles[profile["user_id"]] = profile
 
             members = []

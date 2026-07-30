@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from collections.abc import Iterable
+from datetime import UTC, datetime, timedelta
 from typing import Any
 from urllib.parse import urlsplit
 
@@ -39,6 +41,8 @@ RELATIONSHIP_ACTION_SOURCES = {
     "blockUser",
     "unblockUser",
 }
+PROFILE_COMPLETE_TTL = timedelta(days=7)
+PROFILE_INCOMPLETE_TTL = timedelta(hours=6)
 
 
 def profile_bool(value: Any) -> bool | None:
@@ -157,6 +161,98 @@ def profile_initials(name: str) -> str:
     return f"{words[0][0]}{words[-1][0]}".upper()
 
 
+def canonical_profile_user_id(user_id: str, requested_user_ids: Iterable[str]) -> str:
+    """Map the transport-only ``_0`` suffix back to a requested Zalo user ID."""
+    candidate = str(user_id).strip()
+    requested = {
+        str(value).strip()
+        for value in requested_user_ids
+        if str(value).strip()
+    }
+    if candidate.endswith("_0") and candidate[:-2] in requested:
+        return candidate[:-2]
+    return candidate
+
+
+def _fallback_profile_name(user_id: str) -> str:
+    return f"Zalo {user_id[-6:]}"
+
+
+def _merge_profile_payload(current: dict, candidate: dict) -> dict:
+    user_id = current["user_id"]
+    merged = dict(current)
+    current_fallback = merged["name"] == _fallback_profile_name(user_id)
+    candidate_fallback = candidate["name"] == _fallback_profile_name(user_id)
+    if current_fallback and not candidate_fallback:
+        merged["name"] = candidate["name"]
+        merged["initials"] = candidate["initials"]
+    for key in ("avatar_url", "phone"):
+        if not merged.get(key) and candidate.get(key):
+            merged[key] = candidate[key]
+    if candidate.get("online") is not None:
+        merged["online"] = candidate["online"]
+    if (
+        merged.get("relationship_status") == "unknown"
+        and candidate.get("relationship_status") != "unknown"
+    ):
+        merged["relationship_status"] = candidate["relationship_status"]
+    merged["blocked_by_me"] = bool(
+        merged.get("blocked_by_me") or candidate.get("blocked_by_me")
+    )
+    return merged
+
+
+def _aware_timestamp(value: datetime) -> datetime:
+    return value if value.tzinfo is not None else value.replace(tzinfo=UTC)
+
+
+def profile_needs_refresh(
+    profile: ZaloContactProfile | None,
+    *,
+    now: datetime | None = None,
+) -> bool:
+    if profile is None:
+        return True
+    current = now or utcnow()
+    incomplete = (
+        not profile.avatar_url
+        or not profile.name
+        or profile.name == _fallback_profile_name(profile.user_id)
+    )
+    ttl = PROFILE_INCOMPLETE_TTL if incomplete else PROFILE_COMPLETE_TTL
+    return _aware_timestamp(profile.synced_at) <= current - ttl
+
+
+def profile_ids_needing_refresh(
+    session: Session,
+    *,
+    account_id: str,
+    user_ids: Iterable[str],
+    account_uid: str | None = None,
+    now: datetime | None = None,
+) -> list[str]:
+    requested = list(
+        dict.fromkeys(
+            str(user_id).strip()
+            for user_id in user_ids
+            if str(user_id).strip()
+            and str(user_id).strip() not in {"0", str(account_uid or "")}
+        )
+    )
+    if not requested:
+        return []
+    cached = cached_profiles(
+        session,
+        account_id=account_id,
+        user_ids=set(requested),
+    )
+    return [
+        user_id
+        for user_id in requested
+        if profile_needs_refresh(cached.get(user_id), now=now)
+    ]
+
+
 def normalize_profiles(result: Any) -> list[dict]:
     profiles: list[dict] = []
     seen: set[str] = set()
@@ -222,14 +318,28 @@ def cache_profiles(
     requested_user_ids: list[str] | None = None,
 ) -> list[dict]:
     normalized = normalize_profiles(result)
-    by_id = {item["user_id"]: item for item in normalized}
     requested = {
         str(user_id).strip()
         for user_id in (requested_user_ids or [])
         if str(user_id).strip()
     }
+    by_id: dict[str, dict] = {}
+    transport_aliases: dict[str, str] = {}
+    for item in normalized:
+        raw_user_id = item["user_id"]
+        user_id = canonical_profile_user_id(raw_user_id, requested)
+        candidate = {**item, "user_id": user_id}
+        if candidate["name"] == _fallback_profile_name(raw_user_id):
+            candidate["name"] = _fallback_profile_name(user_id)
+            candidate["initials"] = profile_initials(candidate["name"])
+        if raw_user_id != user_id:
+            transport_aliases[raw_user_id] = user_id
+        if user_id in by_id:
+            by_id[user_id] = _merge_profile_payload(by_id[user_id], candidate)
+        else:
+            by_id[user_id] = candidate
     for user_id in requested - set(by_id):
-        fallback_name = f"Zalo {user_id[-6:]}"
+        fallback_name = _fallback_profile_name(user_id)
         by_id[user_id] = {
             "user_id": user_id,
             "name": fallback_name,
@@ -246,7 +356,7 @@ def cache_profiles(
         for item in session.scalars(
             select(ZaloContactProfile).where(
                 ZaloContactProfile.account_id == account_id,
-                ZaloContactProfile.user_id.in_(tuple(by_id)),
+                ZaloContactProfile.user_id.in_(tuple(set(by_id) | set(transport_aliases))),
             )
         ).all()
     } if by_id else {}
@@ -260,7 +370,7 @@ def cache_profiles(
                 name=item["name"],
             )
             session.add(row)
-        is_fallback = item["name"] == f"Zalo {user_id[-6:]}"
+        is_fallback = item["name"] == _fallback_profile_name(user_id)
         if not is_fallback or not row.name:
             row.name = item["name"]
         if item["avatar_url"]:
@@ -282,6 +392,21 @@ def cache_profiles(
             row.blocked_by_me = False
         row.source = source
         row.synced_at = synced_at
+        for alias_id, canonical_id in transport_aliases.items():
+            if canonical_id != user_id:
+                continue
+            alias = existing.get(alias_id)
+            if alias is None or alias is row or alias.source != "fetchUserInfo":
+                continue
+            if (not row.name or row.name == _fallback_profile_name(user_id)) and alias.name:
+                row.name = alias.name
+            if not row.avatar_url and alias.avatar_url:
+                row.avatar_url = alias.avatar_url
+            if not row.phone and alias.phone:
+                row.phone = alias.phone
+            if row.online is None and alias.online is not None:
+                row.online = alias.online
+            session.delete(alias)
     session.flush()
     return sorted(by_id.values(), key=lambda item: item["name"].casefold())
 

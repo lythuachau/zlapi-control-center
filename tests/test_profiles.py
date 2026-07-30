@@ -1,14 +1,17 @@
 from __future__ import annotations
 
+from datetime import timedelta
+
 import pytest
 
 from control_center.connector import ZaloConnector, ZaloResponseError
 from control_center.db import Database
-from control_center.models import ZaloAccount, ZaloContactProfile
+from control_center.models import ZaloAccount, ZaloContactProfile, utcnow
 from control_center.profiles import (
     apply_relationship_action,
     backfill_friend_profiles,
     normalize_profiles,
+    profile_ids_needing_refresh,
 )
 
 
@@ -39,6 +42,20 @@ class RejectedRelationshipClient:
     def blockUser(self, userId):
         assert userId == "person-rejected"
         return {"error_code": 403, "error_message": "not allowed"}
+
+
+class SuffixedProfileClient:
+    def fetchUserInfo(self, user_ids):
+        assert user_ids == ["visitor-7"]
+        return {
+            "profiles": {
+                "visitor-7_0": {
+                    "userId": "visitor-7_0",
+                    "displayName": "Visitor Seven",
+                    "avatar": "https://s120-26-ava-talk.zadn.vn/visitor-7.jpg",
+                }
+            }
+        }
 
 
 def test_normalize_profiles_supports_profile_maps_and_protocol_relative_avatars():
@@ -134,6 +151,133 @@ def test_connector_fetches_and_caches_private_chat_profiles(settings):
     assert rows["visitor-3"].name == "Zalo itor-3"
     assert rows["visitor-3"].avatar_url is None
     assert "self-uid" not in rows
+    database.dispose()
+
+
+def test_connector_canonicalizes_transport_suffix_and_removes_alias(settings):
+    settings.ensure_directories()
+    database = Database(settings)
+    database.create_schema()
+    connector = ZaloConnector(settings, object())
+    connector.client_for = lambda _account: SuffixedProfileClient()
+
+    with database.session_factory() as session:
+        account = ZaloAccount(
+            name="Suffixed profile",
+            zalo_uid="self-uid",
+            cookie_cipher="unused",
+            imei_cipher="unused",
+            status="online",
+            enabled=True,
+        )
+        session.add(account)
+        session.commit()
+        session.add_all(
+            [
+                ZaloContactProfile(
+                    account_id=account.id,
+                    user_id="visitor-7",
+                    name="Zalo itor-7",
+                    relationship_status="blocked",
+                    blocked_by_me=True,
+                    source="blockUser",
+                ),
+                ZaloContactProfile(
+                    account_id=account.id,
+                    user_id="visitor-7_0",
+                    name="Visitor Seven Alias",
+                    avatar_url="https://s120-26-ava-talk.zadn.vn/old.jpg",
+                    source="fetchUserInfo",
+                ),
+            ]
+        )
+        session.commit()
+
+        result = connector.fetch_chat_profiles(
+            session,
+            account,
+            {"user_ids": ["visitor-7"]},
+        )
+        canonical = session.get(ZaloContactProfile, (account.id, "visitor-7"))
+        alias = session.get(ZaloContactProfile, (account.id, "visitor-7_0"))
+
+        assert result["count"] == 1
+        assert result["profiles"][0]["user_id"] == "visitor-7"
+        assert canonical is not None
+        assert canonical.name == "Visitor Seven"
+        assert canonical.avatar_url.endswith("/visitor-7.jpg")
+        assert canonical.relationship_status == "blocked"
+        assert canonical.blocked_by_me is True
+        assert alias is None
+    database.dispose()
+
+
+def test_profile_refresh_uses_shorter_ttl_for_incomplete_cache(settings):
+    settings.ensure_directories()
+    database = Database(settings)
+    database.create_schema()
+    now = utcnow()
+    with database.session_factory() as session:
+        account = ZaloAccount(
+            name="Profile refresh TTL",
+            cookie_cipher="unused",
+            imei_cipher="unused",
+        )
+        session.add(account)
+        session.commit()
+        session.add_all(
+            [
+                ZaloContactProfile(
+                    account_id=account.id,
+                    user_id="fresh-missing",
+                    name="Zalo issing",
+                    source="fetchUserInfo",
+                    synced_at=now,
+                ),
+                ZaloContactProfile(
+                    account_id=account.id,
+                    user_id="stale-missing",
+                    name="Zalo issing",
+                    source="fetchUserInfo",
+                    synced_at=now - timedelta(hours=7),
+                ),
+                ZaloContactProfile(
+                    account_id=account.id,
+                    user_id="fresh-complete",
+                    name="Fresh Complete",
+                    avatar_url="https://example.com/fresh.jpg",
+                    source="fetchUserInfo",
+                    synced_at=now - timedelta(days=6),
+                ),
+                ZaloContactProfile(
+                    account_id=account.id,
+                    user_id="stale-complete",
+                    name="Stale Complete",
+                    avatar_url="https://example.com/stale.jpg",
+                    source="fetchUserInfo",
+                    synced_at=now - timedelta(days=8),
+                ),
+            ]
+        )
+        session.commit()
+
+        due = profile_ids_needing_refresh(
+            session,
+            account_id=account.id,
+            account_uid="self-uid",
+            user_ids=[
+                "fresh-missing",
+                "stale-missing",
+                "fresh-complete",
+                "stale-complete",
+                "new-profile",
+                "self-uid",
+                "0",
+            ],
+            now=now,
+        )
+
+        assert due == ["stale-missing", "stale-complete", "new-profile"]
     database.dispose()
 
 

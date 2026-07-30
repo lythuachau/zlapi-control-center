@@ -15,10 +15,13 @@ from zlapi import ThreadType, ZaloAPI
 from .config import get_settings
 from .connector import jsonable
 from .db import Database
-from .models import Event, ZaloAccount, utcnow
+from .models import Event, Job, ZaloAccount, utcnow
+from .profiles import profile_ids_needing_refresh
 from .security import SecretBox
 
 logger = logging.getLogger("zlapi.listener")
+PROFILE_SYNC_BATCH_SIZE = 100
+PROFILE_SYNC_COALESCE_SECONDS = 2
 
 
 def listener_event_dedupe_key(
@@ -59,6 +62,66 @@ def _mark_account_online(session, account_id: str) -> None:
         account.last_error = None
 
 
+def queue_interaction_profile_sync(session, account: ZaloAccount, payload: dict) -> Job | None:
+    author_id = str(payload.get("author_id") or "").strip()
+    due_ids = profile_ids_needing_refresh(
+        session,
+        account_id=account.id,
+        user_ids=[author_id],
+        account_uid=account.zalo_uid,
+    )
+    if not due_ids:
+        return None
+    author_id = due_ids[0]
+    active_jobs = session.scalars(
+        select(Job)
+        .where(
+            Job.account_id == account.id,
+            Job.action == "__chat_profiles__",
+            Job.status.in_(("queued", "running")),
+        )
+        .order_by(desc(Job.created_at))
+        .limit(5)
+    ).all()
+    queued_target = None
+    for job in active_jobs:
+        job_ids = list(
+            dict.fromkeys(
+                str(value).strip()
+                for value in (job.payload or {}).get("user_ids", [])
+                if str(value).strip()
+            )
+        )
+        if author_id in job_ids:
+            return job
+        if job.status == "queued" and len(job_ids) < PROFILE_SYNC_BATCH_SIZE:
+            queued_target = (job, job_ids)
+    if queued_target:
+        job, job_ids = queued_target
+        job.payload = {
+            **(job.payload or {}),
+            "user_ids": [*job_ids, author_id],
+        }
+        session.flush()
+        return job
+
+    job = Job(
+        account_id=account.id,
+        action="__chat_profiles__",
+        payload={
+            "user_ids": [author_id],
+            "_chat_context": {"profile_trigger": "interaction"},
+        },
+        created_by_id=None,
+        priority=65,
+        max_attempts=2,
+        next_run_at=utcnow() + timedelta(seconds=PROFILE_SYNC_COALESCE_SECONDS),
+    )
+    session.add(job)
+    session.flush()
+    return job
+
+
 def store_listener_event(
     database: Database,
     account_id: str,
@@ -96,6 +159,18 @@ def store_listener_event(
             )
         )
         _mark_account_online(session, account_id)
+        if event_type == "message.received":
+            account = session.get(ZaloAccount, account_id)
+            if account:
+                try:
+                    with session.begin_nested():
+                        queue_interaction_profile_sync(session, account, normalized_payload)
+                except Exception as exc:
+                    logger.warning(
+                        "Could not queue interaction profile sync for account %s: %s",
+                        account_id,
+                        exc,
+                    )
         try:
             session.commit()
             return True
