@@ -9,6 +9,17 @@
   const $ = (selector, root = document) => root.querySelector(selector);
   const $$ = (selector, root = document) => [...root.querySelectorAll(selector)];
   const MAX_QUICK_REACTIONS = 40;
+  const MESSAGE_PAGE_SIZE = 180;
+  const FIXED_LIST_VIRTUAL_THRESHOLD = 60;
+  const FIXED_LIST_OVERSCAN = 8;
+  const timeFormatter = new Intl.DateTimeFormat("vi-VN", {
+    hour: "2-digit",
+    minute: "2-digit",
+  });
+  const dateFormatter = new Intl.DateTimeFormat("vi-VN", {
+    day: "2-digit",
+    month: "2-digit",
+  });
   const state = {
     accountId: "",
     activeThread: null,
@@ -72,6 +83,9 @@
     canManageAutomations: app.dataset.canManageAutomations === "true",
     reloadTimer: null,
     messageReloadTimer: null,
+    messageIncrementalTimer: null,
+    messageIncrementalRunning: false,
+    messageIncrementalQueuedThread: "",
     messageRequestId: 0,
     messagePagination: {
       hasOlder: false,
@@ -80,6 +94,7 @@
     },
     unreadReview: null,
     unreadViewportFrame: null,
+    messageScrollFrame: null,
     followLatest: false,
     bottomSettleTimers: [],
     lastExitReadKey: "",
@@ -93,6 +108,7 @@
     forwardSelection: new Map(),
     pendingReactionJobs: new Map(),
     reactionManagerDraft: [],
+    reactionPickerSignature: "",
     canManageReactions: app.dataset.canManageReactions === "true",
     attachments: [],
     attachmentSequence: 0,
@@ -114,7 +130,72 @@
     canManageGifLibrary: app.dataset.canManageGifLibrary === "true",
     richContactSearch: "",
     lastMessageScrollTop: 0,
+    conversationVirtualFrame: null,
+    contactsVirtualFrame: null,
+    groupMembersVirtualFrame: null,
+    richContactsVirtualFrame: null,
   };
+
+  const libraryImageTimers = new WeakMap();
+  let libraryImageObserver = null;
+
+  function observeLibraryImage(image, source, { animated = false } = {}) {
+    if (!source) return;
+    image.loading = "lazy";
+    image.decoding = "async";
+    image.fetchPriority = "low";
+    if (!window.IntersectionObserver) {
+      image.src = source;
+      return;
+    }
+    if (!libraryImageObserver) {
+      libraryImageObserver = new IntersectionObserver((entries) => {
+        for (const entry of entries) {
+          const node = entry.target;
+          const timer = libraryImageTimers.get(node);
+          if (timer) {
+            window.clearTimeout(timer);
+            libraryImageTimers.delete(node);
+          }
+          if (!node.isConnected) {
+            libraryImageObserver.unobserve(node);
+            continue;
+          }
+          if (entry.isIntersecting) {
+            if (!node.getAttribute("src")) node.src = node.dataset.librarySrc;
+            if (node.dataset.libraryAnimated !== "true") {
+              libraryImageObserver.unobserve(node);
+            }
+            continue;
+          }
+          if (node.dataset.libraryAnimated === "true" && node.getAttribute("src")) {
+            const unloadTimer = window.setTimeout(() => {
+              if (!node.isConnected) {
+                libraryImageObserver.unobserve(node);
+              } else {
+                node.removeAttribute("src");
+              }
+              libraryImageTimers.delete(node);
+            }, 500);
+            libraryImageTimers.set(node, unloadTimer);
+          }
+        }
+      }, { rootMargin: "320px 0px", threshold: 0.01 });
+    }
+    image.dataset.librarySrc = source;
+    image.dataset.libraryAnimated = String(animated);
+    libraryImageObserver.observe(image);
+  }
+
+  function cleanupLibraryImages(root) {
+    if (!root || !libraryImageObserver) return;
+    for (const image of root.querySelectorAll("[data-library-src]")) {
+      const timer = libraryImageTimers.get(image);
+      if (timer) window.clearTimeout(timer);
+      libraryImageTimers.delete(image);
+      libraryImageObserver.unobserve(image);
+    }
+  }
 
   const accountSelect = $("#chat-account");
   const conversationList = $("#chat-conversations");
@@ -357,6 +438,8 @@
       image.src = item.avatar_url;
       image.alt = "";
       image.loading = "lazy";
+      image.decoding = "async";
+      image.fetchPriority = "low";
       image.referrerPolicy = "no-referrer";
       image.addEventListener("error", () => image.remove(), { once: true });
       node.append(image);
@@ -377,15 +460,9 @@
     if (Number.isNaN(date.getTime())) return "—";
     const today = new Date();
     if (date.toDateString() === today.toDateString()) {
-      return new Intl.DateTimeFormat("vi-VN", {
-        hour: "2-digit",
-        minute: "2-digit",
-      }).format(date);
+      return timeFormatter.format(date);
     }
-    return new Intl.DateTimeFormat("vi-VN", {
-      day: "2-digit",
-      month: "2-digit",
-    }).format(date);
+    return dateFormatter.format(date);
   }
 
   function selectedAccountOption() {
@@ -544,6 +621,7 @@
         const image = document.createElement("img");
         image.src = item.objectUrl;
         image.alt = "";
+        image.decoding = "async";
         preview.append(image);
       } else if (item.kind === "video") {
         const video = document.createElement("video");
@@ -707,6 +785,7 @@
       image.className = "sticker";
       image.src = item.thumbnail_url;
       image.alt = `Sticker ${item.sticker_id}`;
+      image.decoding = "async";
       image.addEventListener("error", () => {
         richPreviewMedia.textContent = "STK";
       }, { once: true });
@@ -718,6 +797,7 @@
       const image = document.createElement("img");
       image.src = item.objectUrl || item.preview_url;
       image.alt = item.file?.name || item.name || "GIF";
+      image.decoding = "async";
       richPreviewMedia.append(image);
       richPreviewTitle.textContent = item.file?.name || item.name || "GIF";
       richPreviewCopy.textContent = item.libraryId
@@ -865,6 +945,7 @@
 
   function renderStickerCatalog() {
     if (!stickerGrid) return;
+    cleanupLibraryImages(stickerGrid);
     const items = visibleStickers();
     if (!items.length) {
       const empty = document.createElement("div");
@@ -887,9 +968,8 @@
       card.tabIndex = 0;
       card.setAttribute("aria-label", `Xem trước sticker ${item.sticker_id}`);
       const image = document.createElement("img");
-      image.src = item.thumbnail_url;
       image.alt = "";
-      image.loading = "lazy";
+      observeLibraryImage(image, item.thumbnail_url, { animated: true });
       const code = document.createElement("small");
       code.textContent = `${item.category_id}:${item.sticker_id}`;
       const favorite = document.createElement("button");
@@ -1069,6 +1149,7 @@
 
   function renderGifLibrary() {
     if (!gifGrid) return;
+    cleanupLibraryImages(gifGrid);
     $$("[data-gif-filter]").forEach((button) => {
       button.classList.toggle("active", button.dataset.gifFilter === state.gifFilter);
     });
@@ -1093,9 +1174,8 @@
         card.setAttribute("aria-label", `Xem trước GIF ${item.name}`);
 
         const image = document.createElement("img");
-        image.src = item.preview_url;
         image.alt = "";
-        image.loading = "lazy";
+        observeLibraryImage(image, item.preview_url, { animated: true });
         const copy = document.createElement("span");
         copy.className = "zchat-gif-item-copy";
         const name = document.createElement("strong");
@@ -1260,6 +1340,46 @@
     }
   }
 
+  function renderRichContact(item) {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = `zchat-rich-contact-item${
+      state.richDraft?.kind === "contact"
+      && state.richDraft.contact_user_id === item.user_id
+        ? " selected"
+        : ""
+    }`;
+    const avatar = document.createElement("span");
+    paintAvatar(avatar, {
+      ...item,
+      thread_id: item.user_id,
+      thread_type: "user",
+    });
+    const copy = document.createElement("span");
+    const name = document.createElement("strong");
+    name.textContent = item.name;
+    const detail = document.createElement("small");
+    detail.textContent = item.phone || `ID ${item.user_id}`;
+    copy.append(name, detail);
+    const presence = document.createElement("i");
+    presence.className = item.online ? "online" : "";
+    button.append(avatar, copy, presence);
+    button.addEventListener("click", () => {
+      setRichDraft({
+        kind: "contact",
+        label: item.name,
+        contact_user_id: item.user_id,
+        contact_name: item.name,
+        contact_phone: item.phone || null,
+        contact_qr_url: "",
+        avatar_url: item.avatar_url || null,
+        initials: item.initials,
+      });
+      renderRichContacts();
+    });
+    return button;
+  }
+
   function renderRichContacts() {
     if (!richContactList) return;
     const term = state.richContactSearch.toLocaleLowerCase("vi");
@@ -1278,45 +1398,9 @@
       richContactList.replaceChildren(empty);
       return;
     }
-    richContactList.replaceChildren(...items.map((item) => {
-      const button = document.createElement("button");
-      button.type = "button";
-      button.className = `zchat-rich-contact-item${
-        state.richDraft?.kind === "contact"
-        && state.richDraft.contact_user_id === item.user_id
-          ? " selected"
-          : ""
-      }`;
-      const avatar = document.createElement("span");
-      paintAvatar(avatar, {
-        ...item,
-        thread_id: item.user_id,
-        thread_type: "user",
-      });
-      const copy = document.createElement("span");
-      const name = document.createElement("strong");
-      name.textContent = item.name;
-      const detail = document.createElement("small");
-      detail.textContent = item.phone || `ID ${item.user_id}`;
-      copy.append(name, detail);
-      const presence = document.createElement("i");
-      presence.className = item.online ? "online" : "";
-      button.append(avatar, copy, presence);
-      button.addEventListener("click", () => {
-        setRichDraft({
-          kind: "contact",
-          label: item.name,
-          contact_user_id: item.user_id,
-          contact_name: item.name,
-          contact_phone: item.phone || null,
-          contact_qr_url: "",
-          avatar_url: item.avatar_url || null,
-          initials: item.initials,
-        });
-        renderRichContacts();
-      });
-      return button;
-    }));
+    richContactList.replaceChildren(
+      ...virtualFixedNodes(richContactList, items, renderRichContact, 62),
+    );
   }
 
   function validHttpUrl(value) {
@@ -1603,6 +1687,60 @@
     if (!state.contacts.length) void loadContacts();
   }
 
+  function virtualFixedNodes(container, items, renderItem, rowHeight) {
+    if (!container || items.length < FIXED_LIST_VIRTUAL_THRESHOLD) {
+      container?.removeAttribute("data-virtualized");
+      return items.map(renderItem);
+    }
+    container.dataset.virtualized = "true";
+    const viewportHeight = Math.max(container.clientHeight || 0, 420);
+    const visibleRows = Math.ceil(viewportHeight / rowHeight);
+    const rawStart = Math.max(
+      0,
+      Math.floor(container.scrollTop / rowHeight) - FIXED_LIST_OVERSCAN,
+    );
+    const start = Math.min(
+      rawStart,
+      Math.max(0, items.length - visibleRows),
+    );
+    const end = Math.min(
+      items.length,
+      start + visibleRows + (FIXED_LIST_OVERSCAN * 2),
+    );
+    const topSpacer = document.createElement("div");
+    topSpacer.className = "zchat-virtual-spacer";
+    topSpacer.style.height = `${start * rowHeight}px`;
+    topSpacer.setAttribute("aria-hidden", "true");
+    const bottomSpacer = document.createElement("div");
+    bottomSpacer.className = "zchat-virtual-spacer";
+    bottomSpacer.style.height = `${Math.max(0, items.length - end) * rowHeight}px`;
+    bottomSpacer.setAttribute("aria-hidden", "true");
+    return [
+      topSpacer,
+      ...items.slice(start, end).map(renderItem),
+      bottomSpacer,
+    ];
+  }
+
+  function scheduleFixedListRender(kind) {
+    const frameKeys = {
+      contacts: "contactsVirtualFrame",
+      conversations: "conversationVirtualFrame",
+      groupMembers: "groupMembersVirtualFrame",
+      richContacts: "richContactsVirtualFrame",
+    };
+    const frameKey = frameKeys[kind];
+    if (!frameKey) return;
+    if (state[frameKey] !== null) return;
+    state[frameKey] = window.requestAnimationFrame(() => {
+      state[frameKey] = null;
+      if (kind === "contacts") renderContacts();
+      else if (kind === "groupMembers") renderGroupMemberWindow();
+      else if (kind === "richContacts") renderRichContacts();
+      else renderConversations();
+    });
+  }
+
   function renderConversation(item) {
     const button = document.createElement("button");
     button.type = "button";
@@ -1680,7 +1818,9 @@
       conversationList.replaceChildren(empty);
       return;
     }
-    conversationList.replaceChildren(...items.map(renderConversation));
+    conversationList.replaceChildren(
+      ...virtualFixedNodes(conversationList, items, renderConversation, 70),
+    );
   }
 
   function visibleContacts() {
@@ -1747,7 +1887,9 @@
       contactsList.replaceChildren(empty);
       return;
     }
-    contactsList.replaceChildren(...items.map(renderContact));
+    contactsList.replaceChildren(
+      ...virtualFixedNodes(contactsList, items, renderContact, 76),
+    );
   }
 
   function setAutomationNotice(message, tone = "") {
@@ -1797,6 +1939,7 @@
         image.src = item.avatar_url;
         image.alt = "";
         image.loading = "lazy";
+        image.decoding = "async";
         image.addEventListener("error", () => image.remove(), { once: true });
         avatar.append(image);
       }
@@ -1845,6 +1988,7 @@
     const image = document.createElement("img");
     image.src = sticker.thumbnail_url;
     image.alt = "";
+    image.decoding = "async";
     image.addEventListener("error", () => {
       preview.textContent = "STK";
     }, { once: true });
@@ -1861,6 +2005,7 @@
 
   function renderAutomationStickers() {
     if (!automationStickers) return;
+    cleanupLibraryImages(automationStickers);
     if (!state.stickerCatalog.length) {
       const empty = document.createElement("div");
       empty.className = "zchat-list-empty";
@@ -1885,9 +2030,8 @@
         : "Sticker không hợp lệ";
       if (sticker) {
         const image = document.createElement("img");
-        image.src = sticker.thumbnail_url;
         image.alt = "";
-        image.loading = "lazy";
+        observeLibraryImage(image, sticker.thumbnail_url, { animated: true });
         button.append(image);
         button.addEventListener("click", () => {
           state.automationSticker = sticker;
@@ -2561,9 +2705,76 @@
     container.append(caption);
   }
 
+  let deferredMediaObserver = null;
+
+  function ensureDeferredMediaObserver() {
+    if (deferredMediaObserver || !window.IntersectionObserver) {
+      return deferredMediaObserver;
+    }
+    deferredMediaObserver = new IntersectionObserver((entries) => {
+      for (const entry of entries) {
+        const media = entry.target;
+        if (!media.isConnected) {
+          deferredMediaObserver.unobserve(media);
+          continue;
+        }
+        if (entry.isIntersecting) {
+          const source = media.dataset.deferredSrc;
+          if (source && media.getAttribute("src") !== source) {
+            media.src = source;
+            if (media instanceof HTMLVideoElement) media.load();
+          }
+          continue;
+        }
+        if (media instanceof HTMLVideoElement) {
+          media.pause();
+        } else if (media.dataset.mediaKind === "gif" && media.dataset.posterSrc) {
+          media.src = media.dataset.posterSrc;
+        }
+      }
+    }, {
+      root: messagesNode,
+      rootMargin: "600px 0px",
+      threshold: 0.01,
+    });
+    return deferredMediaObserver;
+  }
+
+  function observeDeferredMedia(media, source, { kind = "", poster = "" } = {}) {
+    if (!source) return;
+    const observer = ensureDeferredMediaObserver();
+    if (!observer) {
+      media.src = source;
+      return;
+    }
+    media.dataset.deferredSrc = source;
+    media.dataset.mediaKind = kind;
+    if (poster) media.dataset.posterSrc = poster;
+    observer.observe(media);
+  }
+
+  function cleanupDeferredMedia(root) {
+    if (!deferredMediaObserver || !root) return;
+    for (const media of root.querySelectorAll("[data-deferred-src]")) {
+      deferredMediaObserver.unobserve(media);
+    }
+  }
+
+  function applyMediaDimensions(node, media) {
+    const width = Number(media.width) || 0;
+    const height = Number(media.height) || 0;
+    if (width > 0) node.width = width;
+    if (height > 0) node.height = height;
+    if (width > 0 && height > 0) {
+      const ratio = Math.min(Math.max(width / height, 0.25), 4);
+      node.style.aspectRatio = String(ratio);
+    }
+  }
+
   function addMediaImage(container, message, { sticker = false } = {}) {
     const media = message.media || {};
-    const source = media.thumbnail_url || media.url;
+    const isGif = message.kind === "gif" || media.animated === true;
+    const source = isGif ? (media.url || media.thumbnail_url) : (media.thumbnail_url || media.url);
     if (!source) {
       const fallback = document.createElement("span");
       fallback.className = sticker ? "zchat-sticker" : "zchat-media-fallback";
@@ -2585,12 +2796,18 @@
     image.className = sticker
       ? "zchat-media-image zchat-sticker-image"
       : "zchat-media-image";
-    image.src = source;
     image.alt = message.text === "[Hình ảnh]" ? "Hình ảnh trong hội thoại" : message.text;
     image.loading = "lazy";
+    image.decoding = "async";
+    image.fetchPriority = "low";
     image.referrerPolicy = "no-referrer";
-    if (Number(media.width) > 0) image.width = Number(media.width);
-    if (Number(media.height) > 0) image.height = Number(media.height);
+    applyMediaDimensions(image, media);
+    const poster = isGif && media.thumbnail_url && media.thumbnail_url !== source
+      ? media.thumbnail_url
+      : "";
+    if (poster) image.src = poster;
+    if (isGif) observeDeferredMedia(image, source, { kind: "gif", poster });
+    else image.src = source;
     image.addEventListener("error", () => {
       const fallback = document.createElement("span");
       fallback.className = sticker ? "zchat-sticker" : "zchat-media-fallback";
@@ -2740,11 +2957,15 @@
       bubble.classList.add("has-media");
       const video = document.createElement("video");
       video.className = "zchat-media-video";
-      video.src = media.url;
       video.controls = true;
-      video.preload = "metadata";
+      video.preload = "none";
       video.referrerPolicy = "no-referrer";
       if (media.thumbnail_url) video.poster = media.thumbnail_url;
+      applyMediaDimensions(video, media);
+      observeDeferredMedia(video, media.url, {
+        kind: "video",
+        poster: media.thumbnail_url || "",
+      });
       bubble.append(video);
       addMediaCaption(bubble, message);
       return;
@@ -2857,9 +3078,9 @@
     return actions;
   }
 
-  function renderMessage(message) {
+  function renderMessage(message, { animate = false } = {}) {
     const row = document.createElement("div");
-    row.className = `zchat-message${message.mine ? " mine" : ""}${message.status === "failed" ? " failed" : ""}`;
+    row.className = `zchat-message${message.mine ? " mine" : ""}${message.status === "failed" ? " failed" : ""}${animate ? " is-new" : ""}`;
     if (message.job_id) row.dataset.jobId = message.job_id;
     row.dataset.messageId = message.id;
     if (message.event_id) row.dataset.eventId = String(message.event_id);
@@ -2935,9 +3156,7 @@
     for (const timerId of state.bottomSettleTimers) {
       window.clearTimeout(timerId);
     }
-    state.bottomSettleTimers = [250, 750, 1500, 3000].map((delay) => (
-      window.setTimeout(settleMessagesAtBottom, delay)
-    ));
+    state.bottomSettleTimers = [];
     requestAnimationFrame(settleMessagesAtBottom);
     for (const media of messagesNode.querySelectorAll("img, video")) {
       if (media instanceof HTMLImageElement && media.complete) continue;
@@ -3057,6 +3276,20 @@
     });
   }
 
+  function scheduleMessageScrollWork() {
+    if (state.messageScrollFrame !== null) return;
+    state.messageScrollFrame = window.requestAnimationFrame(() => {
+      state.messageScrollFrame = null;
+      const currentScrollTop = messagesNode.scrollTop;
+      const scrollingUp = currentScrollTop < state.lastMessageScrollTop - 1;
+      state.lastMessageScrollTop = currentScrollTop;
+      if (isNearMessagesBottom()) state.followLatest = true;
+      if (scrollingUp) scheduleUnreadViewportCheck();
+      if (currentScrollTop <= 90) void loadOlderMessages();
+      updateLatestJump();
+    });
+  }
+
   function updateLatestJump() {
     latestJump.hidden = !(
       state.activeThread &&
@@ -3095,6 +3328,7 @@
       const copy = document.createElement("p");
       copy.textContent = "Tin nhắn mới sẽ xuất hiện tự động khi Listener nhận được.";
       empty.append(icon, title, copy);
+      cleanupDeferredMedia(messagesNode);
       messagesNode.replaceChildren(empty);
       updateUnreadJump();
       updateLatestJump();
@@ -3111,6 +3345,7 @@
       }
       nodes.push(renderMessage(message));
     }
+    cleanupDeferredMedia(messagesNode);
     messagesNode.replaceChildren(...nodes);
 
     if (mode === "preserve") {
@@ -3156,7 +3391,7 @@
         : "";
       const messages = await api(
         `/api/v1/chat/messages?account_id=${encodeURIComponent(state.accountId)}` +
-        `&thread_id=${encodeURIComponent(threadId)}&limit=300${around}`,
+        `&thread_id=${encodeURIComponent(threadId)}&limit=${MESSAGE_PAGE_SIZE}${around}`,
       );
       if (
         requestId !== state.messageRequestId ||
@@ -3164,8 +3399,12 @@
       ) {
         return;
       }
+      if (mode === "preserve" && !aroundEventId && state.messages.length) {
+        mergeIncrementalMessages(messages);
+        return;
+      }
       state.messagePagination = {
-        hasOlder: messages.length >= 300 && Boolean(oldestEventId(messages)),
+        hasOlder: messages.length >= MESSAGE_PAGE_SIZE && Boolean(oldestEventId(messages)),
         nextCursor: oldestEventId(messages),
         loading: false,
       };
@@ -3207,7 +3446,7 @@
     try {
       const older = await api(
         `/api/v1/chat/messages?account_id=${encodeURIComponent(state.accountId)}` +
-        `&thread_id=${encodeURIComponent(threadId)}&limit=300` +
+        `&thread_id=${encodeURIComponent(threadId)}&limit=${MESSAGE_PAGE_SIZE}` +
         `&before_event_id=${encodeURIComponent(cursor)}`,
       );
       if (
@@ -3223,7 +3462,7 @@
       );
       const nextCursor = oldestEventId(uniqueOlder);
       state.messagePagination = {
-        hasOlder: older.length >= 300 && Boolean(nextCursor),
+        hasOlder: older.length >= MESSAGE_PAGE_SIZE && Boolean(nextCursor),
         nextCursor: nextCursor || cursor,
         loading: false,
       };
@@ -3295,6 +3534,25 @@
         .toLocaleLowerCase("vi")
         .includes(term)
     ));
+  }
+
+  function renderGroupMemberWindow() {
+    if (!groupMembersList) return;
+    const members = visibleGroupMembers();
+    if (!members.length) {
+      const empty = document.createElement("div");
+      empty.className = "zchat-group-members-empty";
+      empty.textContent = state.groupMembersSearch
+        ? "Không tìm thấy thành viên phù hợp."
+        : state.groupInfo?.last_sync_at
+          ? "Zalo chưa trả về danh sách thành viên."
+          : "Chưa có dữ liệu thành viên. Hãy đồng bộ nhóm.";
+      groupMembersList.replaceChildren(empty);
+      return;
+    }
+    groupMembersList.replaceChildren(
+      ...virtualFixedNodes(groupMembersList, members, renderGroupMember, 58),
+    );
   }
 
   function currentGroupName() {
@@ -3827,18 +4085,7 @@
     if (group.member_count) {
       $("#chat-detail-members").textContent = group.member_count;
     }
-    if (!members.length) {
-      const empty = document.createElement("div");
-      empty.className = "zchat-group-members-empty";
-      empty.textContent = state.groupMembersSearch
-        ? "Không tìm thấy thành viên phù hợp."
-        : result?.last_sync_at
-          ? "Zalo chưa trả về danh sách thành viên."
-          : "Chưa có dữ liệu thành viên. Hãy đồng bộ nhóm.";
-      groupMembersList?.replaceChildren(empty);
-    } else {
-      groupMembersList?.replaceChildren(...members.map(renderGroupMember));
-    }
+    renderGroupMemberWindow();
 
     const job = result?.job;
     const syncing = job?.status === "queued" || job?.status === "running";
@@ -4724,14 +4971,158 @@
     await loadMessages({ mode: "latest" });
   }
 
-  function appendRealtimeMessage(message) {
-    if (!state.activeThread || message.thread_id !== state.activeThread.thread_id) return;
+  function latestMessageEventId() {
+    return state.messages.reduce(
+      (latest, message) => Math.max(latest, Number(message.event_id) || 0),
+      0,
+    );
+  }
+
+  function messageRenderFingerprint(message) {
+    return JSON.stringify([
+      message.status,
+      message.text,
+      message.kind,
+      message.author_name,
+      message.author_avatar_url,
+      message.media,
+      message.quote,
+      message.reactions,
+      message.forwarded,
+      message.undone,
+      message.error,
+    ]);
+  }
+
+  function removeRenderedMessage(message) {
+    const row = messagesNode.querySelector(
+      `[data-message-id="${CSS.escape(String(message.id))}"]`,
+    );
+    if (!row) return;
+    cleanupDeferredMedia(row);
+    row.remove();
+  }
+
+  function insertRenderedMessage(message, { animate = true } = {}) {
+    const index = state.messages.findIndex((item) => String(item.id) === String(message.id));
+    const node = renderMessage(message, { animate });
+    let nextNode = null;
+    for (let cursor = index + 1; cursor < state.messages.length; cursor += 1) {
+      nextNode = messagesNode.querySelector(
+        `[data-message-id="${CSS.escape(String(state.messages[cursor].id))}"]`,
+      );
+      if (nextNode) break;
+    }
+    if (nextNode) messagesNode.insertBefore(node, nextNode);
+    else messagesNode.append(node);
+  }
+
+  function matchingOptimisticEcho(message) {
+    if (!message.mine || !message.event_id) return null;
+    const createdAt = new Date(message.created_at).getTime();
+    return state.messages
+      .filter((candidate) => (
+        candidate.job_id &&
+        candidate.mine &&
+        candidate.kind === message.kind &&
+        candidate.text === message.text &&
+        Math.abs(new Date(candidate.created_at).getTime() - createdAt) < 5 * 60 * 1000
+      ))
+      .sort((left, right) => (
+        Math.abs(new Date(left.created_at).getTime() - createdAt) -
+        Math.abs(new Date(right.created_at).getTime() - createdAt)
+      ))[0] || null;
+  }
+
+  function mergeIncrementalMessages(messages) {
+    if (!Array.isArray(messages) || !messages.length) return 0;
+    const wasFollowing = state.followLatest || isNearMessagesBottom();
+    const anchor = wasFollowing ? null : captureScrollAnchor();
+    const additions = [];
+    let changes = 0;
+
+    for (const incoming of messages) {
+      const existing = state.messages.find(
+        (message) => String(message.id) === String(incoming.id),
+      );
+      if (existing) {
+        const before = messageRenderFingerprint(existing);
+        Object.assign(existing, incoming);
+        if (before !== messageRenderFingerprint(existing)) {
+          replaceRenderedMessage(existing);
+          changes += 1;
+        }
+        continue;
+      }
+      const optimisticEcho = matchingOptimisticEcho(incoming);
+      if (optimisticEcho) {
+        removeRenderedMessage(optimisticEcho);
+        state.messages = state.messages.filter((item) => item !== optimisticEcho);
+      }
+      state.messages.push(incoming);
+      additions.push(incoming);
+      changes += 1;
+    }
+
+    if (!changes) return 0;
+    state.messages.sort(
+      (left, right) => new Date(left.created_at) - new Date(right.created_at),
+    );
     const empty = $(".zchat-empty", messagesNode);
     if (empty) messagesNode.replaceChildren();
-    state.messages.push(message);
-    messagesNode.append(renderMessage(message));
-    void syncMissingMessageProfiles([message]);
-    scrollMessages();
+    for (const message of additions) insertRenderedMessage(message);
+    void syncMissingMessageProfiles(messages);
+    if (wasFollowing) scrollMessages({ behavior: "auto" });
+    else if (anchor) restoreScrollAnchor(anchor);
+    updateUnreadJump();
+    updateLatestJump();
+    return changes;
+  }
+
+  async function loadNewMessages(threadId) {
+    if (
+      !state.accountId ||
+      !state.activeThread ||
+      state.activeThread.thread_id !== threadId
+    ) return;
+    if (state.messageIncrementalRunning) {
+      state.messageIncrementalQueuedThread = threadId;
+      return;
+    }
+    const cursor = latestMessageEventId();
+    if (!cursor) {
+      scheduleMessageReload(threadId);
+      return;
+    }
+    const accountId = state.accountId;
+    state.messageIncrementalRunning = true;
+    try {
+      const messages = await api(
+        `/api/v1/chat/messages?account_id=${encodeURIComponent(accountId)}` +
+        `&thread_id=${encodeURIComponent(threadId)}` +
+        `&after_event_id=${encodeURIComponent(cursor)}&limit=120`,
+      );
+      if (
+        state.accountId !== accountId ||
+        state.activeThread?.thread_id !== threadId
+      ) return;
+      mergeIncrementalMessages(messages);
+      if (messages.length >= 120) state.messageIncrementalQueuedThread = threadId;
+    } catch (error) {
+      console.warn("Không thể đồng bộ tin nhắn gia tăng", error);
+      scheduleMessageReload(threadId);
+    } finally {
+      state.messageIncrementalRunning = false;
+      const queuedThread = state.messageIncrementalQueuedThread;
+      state.messageIncrementalQueuedThread = "";
+      if (queuedThread) scheduleIncrementalMessageReload(queuedThread);
+    }
+  }
+
+  function appendRealtimeMessage(message) {
+    if (!state.activeThread || message.thread_id !== state.activeThread.thread_id) return;
+    mergeIncrementalMessages([message]);
+    scrollMessages({ behavior: "auto" });
   }
 
   function scheduleConversationReload() {
@@ -4751,6 +5142,15 @@
     );
   }
 
+  function scheduleIncrementalMessageReload(threadId) {
+    if (!state.activeThread || state.activeThread.thread_id !== threadId) return;
+    window.clearTimeout(state.messageIncrementalTimer);
+    state.messageIncrementalTimer = window.setTimeout(
+      () => loadNewMessages(threadId),
+      80,
+    );
+  }
+
   async function changeAccount() {
     const currentNavigation = state.nav;
     const previous = state.activeThread;
@@ -4759,6 +5159,8 @@
       void markConversationRead(previous, previousAccountId);
     }
     state.accountId = accountSelect?.value || "";
+    window.clearTimeout(state.messageIncrementalTimer);
+    state.messageIncrementalQueuedThread = "";
     window.clearTimeout(state.contactsPollTimer);
     window.clearTimeout(state.tasksPollTimer);
     state.contacts = [];
@@ -4822,7 +5224,7 @@
     }
   }
 
-  function reactionButton(item, message, { compact = false } = {}) {
+  function reactionButton(item, { compact = false } = {}) {
     const button = document.createElement("button");
     button.type = "button";
     button.className = compact ? "compact" : "";
@@ -4836,26 +5238,30 @@
       label.textContent = item.label;
       button.append(label);
     }
-    button.addEventListener("click", () => {
-      void submitReaction(message, item.id);
-      hideFloatingMenus();
-    });
     return button;
   }
 
-  function renderReactionPicker(message) {
-    reactionQuick.replaceChildren();
-    reactionAll.replaceChildren();
+  function renderReactionPicker() {
     const enabled = state.reactionCatalog.filter((item) => item.enabled);
     const quick = enabled
       .filter((item) => item.quick)
       .slice(0, MAX_QUICK_REACTIONS);
     const quickIds = new Set(quick.map((item) => item.id));
+    const remaining = enabled.filter((candidate) => !quickIds.has(candidate.id));
+    const signature = JSON.stringify([
+      quick.map((item) => [item.id, item.glyph, item.label, item.mode]),
+      remaining.map((item) => [item.id, item.glyph, item.label, item.mode]),
+      state.canManageReactions,
+    ]);
+    if (signature === state.reactionPickerSignature) return;
+    state.reactionPickerSignature = signature;
+    reactionQuick.replaceChildren();
+    reactionAll.replaceChildren();
     for (const item of quick) {
-      reactionQuick.append(reactionButton(item, message, { compact: true }));
+      reactionQuick.append(reactionButton(item, { compact: true }));
     }
-    for (const item of enabled.filter((candidate) => !quickIds.has(candidate.id))) {
-      reactionAll.append(reactionButton(item, message));
+    for (const item of remaining) {
+      reactionAll.append(reactionButton(item));
     }
     reactionMore.hidden = reactionAll.childElementCount === 0;
     reactionManageOpen.hidden = !state.canManageReactions;
@@ -4869,7 +5275,7 @@
     state.reactionTarget = message;
     state.reactionAnchor = anchor;
     messageMenu.hidden = true;
-    renderReactionPicker(message);
+    renderReactionPicker();
     positionFloating(reactionPicker, anchor);
   }
 
@@ -4877,7 +5283,10 @@
     const row = messagesNode.querySelector(
       `[data-message-id="${CSS.escape(String(message.id))}"]`,
     );
-    if (row) row.replaceWith(renderMessage(message));
+    if (row) {
+      cleanupDeferredMedia(row);
+      row.replaceWith(renderMessage(message));
+    }
   }
 
   function applyReactionOptimistic(message, reactionId, remove) {
@@ -5496,7 +5905,7 @@
         scheduleConversationReload();
         return;
       }
-      scheduleMessageReload(threadId);
+      scheduleIncrementalMessageReload(threadId);
       scheduleConversationReload();
     });
     stream.addEventListener("chat.reaction.local", (event) => {
@@ -5755,6 +6164,7 @@
   $$("[data-chat-filter]").forEach((button) => {
     button.addEventListener("click", () => {
       state.filter = button.dataset.chatFilter;
+      conversationList.scrollTop = 0;
       $$("[data-chat-filter]").forEach((item) => {
         const active = item === button;
         item.classList.toggle("active", active);
@@ -5781,10 +6191,12 @@
   $("#chat-refresh")?.addEventListener("click", () => loadConversations());
   $("#chat-search")?.addEventListener("input", (event) => {
     state.search = event.target.value;
+    conversationList.scrollTop = 0;
     renderConversations();
   });
   contactsSearch?.addEventListener("input", (event) => {
     state.contactsSearch = event.target.value;
+    contactsList.scrollTop = 0;
     renderContacts();
   });
   contactsRefresh?.addEventListener("click", () => {
@@ -5818,6 +6230,7 @@
   });
   groupMembersSearch?.addEventListener("input", (event) => {
     state.groupMembersSearch = event.target.value;
+    if (groupMembersList) groupMembersList.scrollTop = 0;
     renderGroupInfo();
   });
   groupMembersSync?.addEventListener("click", () => {
@@ -5897,6 +6310,14 @@
       aroundEventId: review.firstEventId,
     });
   });
+  for (const reactionList of [reactionQuick, reactionAll]) {
+    reactionList?.addEventListener("click", (event) => {
+      const button = event.target.closest("[data-reaction-id]");
+      if (!button || !state.reactionTarget) return;
+      void submitReaction(state.reactionTarget, button.dataset.reactionId);
+      hideFloatingMenus();
+    });
+  }
   reactionMore?.addEventListener("click", (event) => {
     event.stopPropagation();
     reactionAll.hidden = !reactionAll.hidden;
@@ -5946,6 +6367,26 @@
     }
   });
   window.addEventListener("resize", hideFloatingMenus);
+  conversationList?.addEventListener(
+    "scroll",
+    () => scheduleFixedListRender("conversations"),
+    { passive: true },
+  );
+  contactsList?.addEventListener(
+    "scroll",
+    () => scheduleFixedListRender("contacts"),
+    { passive: true },
+  );
+  groupMembersList?.addEventListener(
+    "scroll",
+    () => scheduleFixedListRender("groupMembers"),
+    { passive: true },
+  );
+  richContactList?.addEventListener(
+    "scroll",
+    () => scheduleFixedListRender("richContacts"),
+    { passive: true },
+  );
   messagesNode?.addEventListener("click", (event) => {
     const row = event.target.closest(".zchat-message");
     if (!row || event.target.closest("button, a, input")) return;
@@ -5954,21 +6395,7 @@
     });
     row.classList.toggle("actions-visible");
   });
-  messagesNode?.addEventListener("scroll", () => {
-    const currentScrollTop = messagesNode.scrollTop;
-    const scrollingUp = currentScrollTop < state.lastMessageScrollTop - 1;
-    state.lastMessageScrollTop = currentScrollTop;
-    if (isNearMessagesBottom()) {
-      state.followLatest = true;
-    }
-    if (scrollingUp) {
-      scheduleUnreadViewportCheck();
-    }
-    if (messagesNode.scrollTop <= 90) {
-      void loadOlderMessages();
-    }
-    updateLatestJump();
-  }, { passive: true });
+  messagesNode?.addEventListener("scroll", scheduleMessageScrollWork, { passive: true });
   for (const eventName of ["wheel", "touchstart", "pointerdown"]) {
     messagesNode?.addEventListener(eventName, stopFollowingLatest, { passive: true });
   }
@@ -6049,6 +6476,7 @@
   }
   richContactSearch?.addEventListener("input", (event) => {
     state.richContactSearch = event.target.value;
+    if (richContactList) richContactList.scrollTop = 0;
     renderRichContacts();
   });
   richSend?.addEventListener("click", () => void sendRichContent());

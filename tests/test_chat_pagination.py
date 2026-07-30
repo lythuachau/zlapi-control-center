@@ -106,3 +106,50 @@ def test_chat_messages_rejects_ambiguous_cursors(client: TestClient):
         headers={"X-CSRF-Token": csrf},
     )
     assert response.status_code == 422
+
+
+def test_chat_messages_can_load_newer_events_incrementally(client: TestClient):
+    login(client)
+    database = client.app.state.database
+    with database.session_factory() as session:
+        account = ZaloAccount(
+            name="Incremental account",
+            cookie_cipher="unused",
+            imei_cipher="unused",
+            status="online",
+            enabled=True,
+        )
+        session.add(account)
+        session.flush()
+        events = [
+            Event(
+                account_id=account.id,
+                event_type="message.received",
+                thread_id="incremental-thread",
+                payload={
+                    "message_id": f"incremental-message-{index}",
+                    "author_id": "friend",
+                    "message": f"Tin mới {index}",
+                    "message_object": {"dName": "Người gửi"},
+                    "thread_type": "USER",
+                },
+            )
+            for index in range(1, 5)
+        ]
+        session.add_all(events)
+        session.flush()
+        cursor = events[1].id
+        session.commit()
+        account_id = account.id
+
+    response = client.get(
+        "/api/v1/chat/messages",
+        params={
+            "account_id": account_id,
+            "thread_id": "incremental-thread",
+            "after_event_id": cursor,
+            "limit": 20,
+        },
+    )
+    assert response.status_code == 200
+    assert [item["text"] for item in response.json()] == ["Tin mới 3", "Tin mới 4"]

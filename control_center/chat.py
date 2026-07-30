@@ -750,6 +750,7 @@ def message_payloads(
     selected_thread_id: str,
     around_event_id: int | None = None,
     before_event_id: int | None = None,
+    after_event_id: int | None = None,
     user_id: str | None = None,
     limit: int = 200,
 ) -> list[dict]:
@@ -763,11 +764,12 @@ def message_payloads(
         event_query = select(Event).where(*event_filter)
         if before_event_id is not None:
             event_query = event_query.where(Event.id < before_event_id)
-        events = session.scalars(
-            event_query
-            .order_by(desc(Event.id))
-            .limit(scan_limit)
-        ).all()
+        if after_event_id is not None:
+            event_query = event_query.where(Event.id > after_event_id)
+            event_order = Event.id
+        else:
+            event_order = desc(Event.id)
+        events = session.scalars(event_query.order_by(event_order).limit(scan_limit)).all()
     else:
         before_target = session.scalars(
             select(Event)
@@ -794,7 +796,7 @@ def message_payloads(
         events = list(reversed(before_projectable)) + after_projectable
 
     jobs = []
-    if around_event_id is None and before_event_id is None:
+    if around_event_id is None and before_event_id is None and after_event_id is None:
         jobs = session.scalars(
             select(Job)
             .where(
@@ -884,6 +886,8 @@ def message_payloads(
     )
     if around_event_id is not None:
         return messages
+    if after_event_id is not None:
+        return messages[:limit]
     return messages[-limit:]
 
 

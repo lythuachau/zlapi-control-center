@@ -2972,14 +2972,19 @@ def list_chat_messages(
     thread_id: str = Query(min_length=1, max_length=100),
     around_event_id: int | None = Query(default=None, ge=1),
     before_event_id: int | None = Query(default=None, ge=1),
+    after_event_id: int | None = Query(default=None, ge=1),
     session: Session = Depends(get_db),
     principal: Principal = Depends(require_scope("read")),
     limit: int = Query(default=200, ge=1, le=500),
 ) -> list[dict]:
-    if around_event_id is not None and before_event_id is not None:
+    cursor_count = sum(
+        cursor is not None
+        for cursor in (around_event_id, before_event_id, after_event_id)
+    )
+    if cursor_count > 1:
         raise HTTPException(
             status_code=422,
-            detail="Chỉ được dùng một cursor: around_event_id hoặc before_event_id",
+            detail="Chỉ được dùng một cursor cho mỗi yêu cầu",
         )
     account = session.get(ZaloAccount, account_id)
     if account is None:
@@ -2990,6 +2995,7 @@ def list_chat_messages(
         selected_thread_id=thread_id,
         around_event_id=around_event_id,
         before_event_id=before_event_id,
+        after_event_id=after_event_id,
         user_id=principal.id if principal.kind == "user" else None,
         limit=limit,
     )
