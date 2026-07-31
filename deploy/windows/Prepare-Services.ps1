@@ -86,6 +86,14 @@ foreach ($path in @($environmentFile, $keyFile)) {
 foreach ($serviceId in $serviceIds) {
     & icacls.exe $PythonRoot /grant "NT SERVICE\${serviceId}:(OI)(CI)RX" /T /C | Out-Null
 }
+$mediaTools = @("C:\Tools\ffmpeg\bin\ffmpeg.exe", "C:\Tools\ffmpeg\bin\ffprobe.exe")
+foreach ($path in $mediaTools) {
+    if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { throw "Required media tool is missing: $path" }
+    foreach ($serviceId in $serviceIds) {
+        & icacls.exe $path /grant "NT SERVICE\${serviceId}:RX" /C | Out-Null
+        if ($LASTEXITCODE -ne 0) { throw "Media tool ACL failed for ${serviceId}: $path" }
+    }
+}
 
 foreach ($serviceId in $serviceIds) {
     $service = Get-CimInstance Win32_Service -Filter "Name='$serviceId'"
