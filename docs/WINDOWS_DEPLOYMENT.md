@@ -116,6 +116,42 @@ ZLAPI_RCLONE_REMOTE=myremote:zlapi-backups
 
 Thử restore backup vào database tạm trước khi go-live.
 
+## Rewrap khóa DPAPI khi chuyển máy
+
+`master-key.dpapi` dùng DPAPI `LocalMachine`, vì vậy không thể sao chép blob
+sang VPS khác. Dùng quy trình envelope sau; không in hoặc ghi AES data key rõ:
+
+1. Trên VPS mới, tạo certificate RSA 3072-bit, non-exportable:
+
+   ```powershell
+   .\deploy\windows\New-RewrapCertificate.ps1 `
+     -PublicCertificatePath C:\Migration\transfer\zlapi-rewrap-public.cer
+   ```
+
+2. Chỉ chuyển file `.cer` công khai sang VPS cũ. Trên VPS cũ, chạy:
+
+   ```powershell
+   .\deploy\windows\Export-RewrapEnvelope.ps1 `
+     -ProtectedKeyPath C:\ZlapiData\secrets\master-key.dpapi `
+     -PublicCertificatePath C:\Migration\transfer\zlapi-rewrap-public.cer `
+     -EnvelopePath C:\Migration\transfer\zlapi-master-key.envelope.json
+   ```
+
+3. Chuyển envelope sang VPS mới và import bằng thumbprint được tạo ở bước 1:
+
+   ```powershell
+   .\deploy\windows\Import-RewrappedMasterKey.ps1 `
+     -EnvelopePath C:\Migration\transfer\zlapi-master-key.envelope.json `
+     -CertificateThumbprint CERTIFICATE_THUMBPRINT `
+     -OutputKeyPath C:\ZlapiData\secrets\master-key.dpapi
+   ```
+
+Script từ chối ghi đè key đã tồn tại. Trước khi service đọc key, bảo vệ ACL của
+`C:\ZlapiData\secrets` và file key để chỉ `SYSTEM`, Administrators cùng ba tài
+khoản service ZLAPI có quyền cần thiết. Sau khi xác minh backup/database test,
+xóa envelope và certificate migration. Không xóa key/blob gốc trên VPS cũ cho
+đến khi hết thời gian rollback.
+
 ## Kiểm tra vận hành
 
 ```powershell
