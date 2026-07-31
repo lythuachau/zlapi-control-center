@@ -14,6 +14,20 @@ $ErrorActionPreference = "Stop"
 Set-StrictMode -Version Latest
 Add-Type -AssemblyName System.Security
 
+function Test-FixedTimeEqual {
+    param(
+        [byte[]]$Left,
+        [byte[]]$Right
+    )
+    if ($null -eq $Left -or $null -eq $Right) { return $false }
+    $difference = $Left.Length -bxor $Right.Length
+    $length = [Math]::Min($Left.Length, $Right.Length)
+    for ($index = 0; $index -lt $length; $index++) {
+        $difference = $difference -bor ($Left[$index] -bxor $Right[$index])
+    }
+    return $difference -eq 0
+}
+
 $envelopeFile = (Resolve-Path -LiteralPath $EnvelopePath).Path
 $target = [IO.Path]::GetFullPath($OutputKeyPath)
 if (Test-Path -LiteralPath $target) {
@@ -31,13 +45,14 @@ if ($payload.version -ne 1 -or $payload.algorithm -ne "RSA-OAEP-SHA256") {
 $thumbprint = ($CertificateThumbprint -replace "\s", "").ToUpperInvariant()
 $certificatePath = "Cert:\$StoreLocation\My\$thumbprint"
 $certificate = Get-Item -LiteralPath $certificatePath
-$fingerprint = [Convert]::ToHexString(
-    [Security.Cryptography.SHA256]::HashData($certificate.RawData)
-).ToLowerInvariant()
-if (-not [Security.Cryptography.CryptographicOperations]::FixedTimeEquals(
-    [Text.Encoding]::ASCII.GetBytes($fingerprint),
-    [Text.Encoding]::ASCII.GetBytes([string]$payload.certificate_sha256)
-)) {
+$sha256 = [Security.Cryptography.SHA256]::Create()
+$certificateHash = $sha256.ComputeHash($certificate.RawData)
+$fingerprint = ([BitConverter]::ToString($certificateHash) -replace "-", "").ToLowerInvariant()
+$sha256.Dispose()
+[Array]::Clear($certificateHash, 0, $certificateHash.Length)
+$fingerprintBytes = [Text.Encoding]::ASCII.GetBytes($fingerprint)
+$expectedFingerprintBytes = [Text.Encoding]::ASCII.GetBytes([string]$payload.certificate_sha256)
+if (-not (Test-FixedTimeEqual -Left $fingerprintBytes -Right $expectedFingerprintBytes)) {
     throw "Envelope certificate fingerprint does not match the selected certificate."
 }
 
@@ -63,7 +78,7 @@ try {
         $null,
         [Security.Cryptography.DataProtectionScope]::LocalMachine
     )
-    if (-not [Security.Cryptography.CryptographicOperations]::FixedTimeEquals($dataKey, $verification)) {
+    if (-not (Test-FixedTimeEqual $dataKey $verification)) {
         throw "DPAPI verification failed."
     }
     Move-Item -LiteralPath $temporary -Destination $target

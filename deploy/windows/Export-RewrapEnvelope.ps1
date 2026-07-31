@@ -26,6 +26,8 @@ if (-not (Test-Path -LiteralPath $parent -PathType Container)) {
 $protected = [IO.File]::ReadAllBytes($keyPath)
 $dataKey = $null
 $ciphertext = $null
+$certificateHash = $null
+$sha256 = $null
 $rsa = $null
 $certificate = $null
 try {
@@ -44,9 +46,9 @@ try {
         throw "Rewrap certificate must use RSA with at least 3072 bits."
     }
     $ciphertext = $rsa.Encrypt($dataKey, [Security.Cryptography.RSAEncryptionPadding]::OaepSHA256)
-    $fingerprint = [Convert]::ToHexString(
-        [Security.Cryptography.SHA256]::HashData($certificate.RawData)
-    ).ToLowerInvariant()
+    $sha256 = [Security.Cryptography.SHA256]::Create()
+    $certificateHash = $sha256.ComputeHash($certificate.RawData)
+    $fingerprint = ([BitConverter]::ToString($certificateHash) -replace "-", "").ToLowerInvariant()
     $payload = [ordered]@{
         version = 1
         algorithm = "RSA-OAEP-SHA256"
@@ -60,6 +62,8 @@ finally {
     if ($null -ne $dataKey) { [Array]::Clear($dataKey, 0, $dataKey.Length) }
     if ($null -ne $protected) { [Array]::Clear($protected, 0, $protected.Length) }
     if ($null -ne $ciphertext) { [Array]::Clear($ciphertext, 0, $ciphertext.Length) }
+    if ($null -ne $certificateHash) { [Array]::Clear($certificateHash, 0, $certificateHash.Length) }
+    if ($null -ne $sha256) { $sha256.Dispose() }
     if ($null -ne $rsa) { $rsa.Dispose() }
     if ($null -ne $certificate) { $certificate.Dispose() }
 }

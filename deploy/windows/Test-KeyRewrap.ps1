@@ -7,6 +7,20 @@ $ErrorActionPreference = "Stop"
 Set-StrictMode -Version Latest
 Add-Type -AssemblyName System.Security
 
+function Test-FixedTimeEqual {
+    param(
+        [byte[]]$Left,
+        [byte[]]$Right
+    )
+    if ($null -eq $Left -or $null -eq $Right) { return $false }
+    $difference = $Left.Length -bxor $Right.Length
+    $length = [Math]::Min($Left.Length, $Right.Length)
+    for ($index = 0; $index -lt $length; $index++) {
+        $difference = $difference -bor ($Left[$index] -bxor $Right[$index])
+    }
+    return $difference -eq 0
+}
+
 $allowedRoot = (Resolve-Path -LiteralPath "C:\Migration\tmp").Path
 $root = [IO.Path]::GetFullPath($TestRoot)
 if (-not $root.StartsWith($allowedRoot + [IO.Path]::DirectorySeparatorChar, [StringComparison]::OrdinalIgnoreCase)) {
@@ -22,7 +36,9 @@ $sourceKey = Join-Path $root "old-master-key.dpapi"
 $envelope = Join-Path $root "master-key.envelope.json"
 $targetKey = Join-Path $root "new-master-key.dpapi"
 $dataKey = [byte[]]::new(32)
-[Security.Cryptography.RandomNumberGenerator]::Fill($dataKey)
+$random = [Security.Cryptography.RandomNumberGenerator]::Create()
+$random.GetBytes($dataKey)
+$random.Dispose()
 $protected = [Security.Cryptography.ProtectedData]::Protect(
     $dataKey,
     $null,
@@ -56,7 +72,7 @@ try {
         $null,
         [Security.Cryptography.DataProtectionScope]::LocalMachine
     )
-    if (-not [Security.Cryptography.CryptographicOperations]::FixedTimeEquals($dataKey, $verification)) {
+    if (-not (Test-FixedTimeEqual $dataKey $verification)) {
         throw "Fake rewrap integration key mismatch."
     }
     Write-Output "FAKE_REWRAP_INTEGRATION_OK"
