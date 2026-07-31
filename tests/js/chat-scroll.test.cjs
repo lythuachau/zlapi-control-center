@@ -11,7 +11,7 @@ const chatPath = path.join(
   "js",
   "chat.js",
 );
-const source = fs.readFileSync(chatPath, "utf8");
+const source = fs.readFileSync(chatPath, "utf8").replace(/\r\n?/g, "\n");
 
 function functionSource(name) {
   const signature = new RegExp(`(?:async\\s+)?function\\s+${name}\\s*\\(`);
