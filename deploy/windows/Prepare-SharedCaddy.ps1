@@ -29,8 +29,8 @@ Copy-Item -LiteralPath (Join-Path $PSScriptRoot "Caddyfile.staging") -Destinatio
 & (Join-Path $bin "caddy.exe") validate --config (Join-Path $shared "Caddyfile")
 if ($LASTEXITCODE -ne 0) { throw "Staging Caddyfile validation failed." }
 
-$wrapper = Join-Path $bin "$serviceId.exe"
-$xml = Join-Path $bin "$serviceId.xml"
+$wrapper = Join-Path $bin "caddy-service.exe"
+$xml = Join-Path $bin "caddy-service.xml"
 Copy-Item -LiteralPath $WinSWPath -Destination $wrapper -Force
 $content = [IO.File]::ReadAllText((Join-Path $PSScriptRoot "services\shared-caddy.xml.template"))
 $content = $content.Replace("{{SERVICE_ROOT}}", $ServiceRoot).Replace("{{DATA_ROOT}}", $DataRoot)
