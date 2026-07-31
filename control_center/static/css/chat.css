@@ -1989,7 +1989,7 @@ body[data-page="chat"] .page > .content {
   display: grid;
   min-width: 0;
   min-height: 0;
-  grid-template-rows: auto minmax(0, 1fr) auto auto auto;
+  grid-template-rows: auto auto minmax(0, 1fr) auto auto auto;
   overflow: hidden;
   background:
     linear-gradient(var(--line) 1px, transparent 1px),
@@ -2020,6 +2020,36 @@ body[data-page="chat"] .page > .content {
   padding: 12px 18px;
   border-bottom: 1px solid var(--line);
   background: color-mix(in srgb, var(--panel) 92%, transparent);
+}
+
+.zchat-connection-banner {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  justify-content: center;
+  flex-wrap: wrap;
+  gap: 12px;
+  padding: 8px 16px;
+  border-bottom: 1px solid color-mix(in srgb, #f59e0b 34%, var(--line));
+  background: color-mix(in srgb, #f59e0b 10%, var(--panel));
+  color: color-mix(in srgb, #f59e0b 78%, var(--ink));
+  font-size: 9px;
+  text-align: center;
+}
+
+.zchat-connection-banner a {
+  flex: 0 0 auto;
+  border: 1px solid color-mix(in srgb, #f59e0b 42%, var(--line));
+  border-radius: 999px;
+  padding: 5px 9px;
+  background: color-mix(in srgb, #f59e0b 8%, var(--raised));
+  color: inherit;
+  font-size: 8px;
+  text-decoration: none;
+}
+
+.zchat-connection-banner a:hover {
+  border-color: #f59e0b;
 }
 
 .zchat-contact {
@@ -2076,6 +2106,10 @@ body[data-page="chat"] .page > .content {
   padding: 20px 24px 12px;
   overflow-anchor: auto;
   overscroll-behavior: contain;
+}
+
+.zchat-messages.is-positioning {
+  overflow-anchor: none;
 }
 
 .zchat-scroll-fab {
@@ -2263,6 +2297,37 @@ body[data-page="chat"] .page > .content {
   line-height: 1.55;
   overflow-wrap: anywhere;
   box-shadow: 0 4px 12px rgba(0, 0, 0, 0.055);
+}
+
+.zchat-message-bubble.has-text,
+.zchat-media-caption {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
+.zchat-message-link {
+  color: var(--accent);
+  font-weight: 800;
+  text-decoration: underline;
+  text-decoration-thickness: 1px;
+  text-underline-offset: 2px;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
+.zchat-message.mine .zchat-message-link {
+  color: inherit;
+}
+
+.zchat-message-link:hover {
+  text-decoration-thickness: 2px;
+}
+
+.zchat-message-link:focus-visible {
+  border-radius: 3px;
+  outline: 2px solid currentColor;
+  outline-offset: 2px;
 }
 
 .zchat-message.mine .zchat-message-bubble {
@@ -2687,6 +2752,14 @@ button.zchat-poll-card {
 .zchat-reaction-summary button span {
   font-family: "Segoe UI Emoji", "Apple Color Emoji", sans-serif;
   font-size: 14px;
+}
+
+.zchat-reaction-wordmark {
+  font-family: "Arial Rounded MT Bold", "Nunito", system-ui, sans-serif !important;
+  font-size: 0.68em !important;
+  font-weight: 900;
+  letter-spacing: -0.04em;
+  line-height: 1;
 }
 
 .zchat-reaction-summary button b {

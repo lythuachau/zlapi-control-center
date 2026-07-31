@@ -9,7 +9,8 @@
   <startmode>Automatic</startmode>
   <delayedAutoStart>true</delayedAutoStart>
   <stoptimeout>60sec</stoptimeout>
-  <stopparentprocessfirst>true</stopparentprocessfirst>
+  <!-- Stop the base-Python child before its venv launcher to prevent orphans. -->
+  <stopparentprocessfirst>false</stopparentprocessfirst>
   <onfailure action="restart" delay="15 sec"/>
   <onfailure action="restart" delay="60 sec"/>
   <resetfailure>1 hour</resetfailure>

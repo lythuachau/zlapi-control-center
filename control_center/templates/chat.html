@@ -1,7 +1,7 @@
 {% extends "base.html" %}
 
 {% block head %}
-  <link rel="stylesheet" href="{{ url_for('static', path='/css/chat.css') }}?v=20260730-quick-reactions-1">
+  <link rel="stylesheet" href="{{ url_for('static', path='/css/chat.css') }}?v=20260731-unread-scroll-1">
 {% endblock %}
 
 {% block content %}
@@ -38,11 +38,12 @@
             <option
               value="{{ account.id }}"
               data-name="{{ account.name }}"
+              data-enabled="{{ 'true' if account.enabled else 'false' }}"
               data-status="{{ account.status }}"
               data-listener="{{ 'true' if account.listener_enabled else 'false' }}"
               data-zalo-uid="{{ account.zalo_uid or '' }}"
             >
-              {{ account.name }}
+              {{ account.name }}{% if not account.enabled %} · chỉ đọc{% endif %}
             </option>
             {% endfor %}
           {% else %}
@@ -325,6 +326,17 @@
           <button type="button" id="chat-thread-info" aria-label="Thông tin hội thoại">•••</button>
         </div>
       </header>
+
+      <div
+        class="zchat-connection-banner"
+        id="chat-connection-banner"
+        role="status"
+        aria-live="polite"
+        hidden
+      >
+        <span id="chat-connection-banner-copy">Mất kết nối — lịch sử vẫn an toàn; cập nhật phiên để gửi tiếp</span>
+        <a href="/accounts" id="chat-connection-banner-action">Cập nhật phiên</a>
+      </div>
 
       <div class="zchat-message-stage">
         <div class="zchat-messages" id="chat-messages">
@@ -1026,5 +1038,6 @@
 {% endblock %}
 
 {% block scripts %}
-  <script defer src="{{ url_for('static', path='/js/chat.js') }}?v=20260730-quick-reactions-1"></script>
+  <script defer src="{{ url_for('static', path='/js/chat-text.js') }}?v=20260731-unread-scroll-1"></script>
+  <script defer src="{{ url_for('static', path='/js/chat.js') }}?v=20260731-unread-scroll-1"></script>
 {% endblock %}

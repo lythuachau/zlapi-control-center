@@ -10,12 +10,20 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
 
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from zlapi import Message, MessageObject, ThreadType, ZaloAPI
+from zlapi._exception import (
+    DecodePayloadError,
+    EncodePayloadError,
+    LoginMethodNotSupport,
+    ZaloLoginError,
+)
 
 from .catalog import ActionSpec, get_action
 from .config import Settings
+from .gif import PreparedGif, prepare_gif_for_zalo
 from .media import gif_library_media_url, outbound_media_url, validate_media_kind
 from .models import GifLibraryItem, MediaUpload, ZaloAccount, utcnow
 from .profiles import cache_profiles, canonical_profile_user_id
@@ -33,6 +41,20 @@ class CircuitOpenError(RuntimeError):
 
 class ZaloResponseError(ValueError):
     pass
+
+
+class AccountIdentityError(ValueError):
+    """Raised when credentials cannot be safely bound to an account history."""
+
+    code = "account_identity_error"
+
+
+class AccountIdentityMismatchError(AccountIdentityError):
+    code = "session_identity_mismatch"
+
+
+class AccountIdentityConflictError(AccountIdentityError):
+    code = "session_identity_conflict"
 
 
 class TokenBucket:
@@ -59,6 +81,12 @@ class TokenBucket:
 _limiters: dict[str, TokenBucket] = {}
 _limiters_lock = threading.Lock()
 AUTOMATION_REACTION_INTERVAL_SECONDS = 0.8
+SESSION_FAILURE_TYPES = (
+    ZaloLoginError,
+    LoginMethodNotSupport,
+    EncodePayloadError,
+    DecodePayloadError,
+)
 
 
 def _limiter(account_id: str) -> TokenBucket:
@@ -584,22 +612,89 @@ class ZaloConnector:
     def client_for(self, account: ZaloAccount) -> ZaloAPI:
         cookies = self.secret_box.decrypt_json(account.cookie_cipher)
         imei = self.secret_box.decrypt_text(account.imei_cipher)
+        return self.client_for_session(
+            cookies=cookies,
+            imei=imei,
+            user_agent=account.user_agent,
+        )
+
+    @staticmethod
+    def client_for_session(
+        *,
+        cookies: dict[str, str],
+        imei: str,
+        user_agent: str | None,
+    ) -> ZaloAPI:
         return ZaloAPI(
             phone="cookie-session",
             password="cookie-session",
             imei=imei,
             session_cookies=cookies,
-            user_agent=account.user_agent,
+            user_agent=user_agent,
             auto_login=True,
         )
+
+    @staticmethod
+    def identity_from_payload(payload: Any, client_uid: Any = None) -> str:
+        normalized = jsonable(payload)
+        profile = normalized.get("profile", {}) if isinstance(normalized, dict) else {}
+        candidate = profile.get("userId") if isinstance(profile, dict) else None
+        uid = str(candidate or client_uid or "").strip()
+        if not uid:
+            raise AccountIdentityError(
+                "Zalo không trả về UID nên không thể xác minh an toàn phiên này."
+            )
+        return uid
+
+    def probe_session(
+        self,
+        *,
+        cookies: dict[str, str],
+        imei: str,
+        user_agent: str | None,
+    ) -> tuple[str, dict]:
+        """Validate candidate secrets without changing the stored account session."""
+        client = self.client_for_session(
+            cookies=cookies,
+            imei=imei,
+            user_agent=user_agent,
+        )
+        payload = jsonable(client.fetchAccountInfo())
+        uid = self.identity_from_payload(payload, client.uid)
+        return uid, payload
+
+    @staticmethod
+    def validate_identity(
+        session: Session,
+        account: ZaloAccount,
+        candidate_uid: str,
+    ) -> None:
+        current_uid = str(account.zalo_uid or "").strip()
+        if current_uid and current_uid != candidate_uid:
+            raise AccountIdentityMismatchError(
+                "Cookie/IMEI mới thuộc một tài khoản Zalo khác. "
+                "Phiên cũ và toàn bộ lịch sử vẫn được giữ nguyên."
+            )
+        owner = session.scalar(
+            select(ZaloAccount).where(
+                ZaloAccount.zalo_uid == candidate_uid,
+                ZaloAccount.id != account.id,
+            )
+        )
+        if owner is not None:
+            raise AccountIdentityConflictError(
+                f"UID Zalo này đang thuộc tài khoản quản lý '{owner.name}'. "
+                "Hãy cập nhật phiên trên đúng tài khoản đó để giữ lịch sử liền mạch."
+            )
 
     def test_account(self, session: Session, account: ZaloAccount) -> dict:
         try:
             client = self.client_for(account)
             info = client.fetchAccountInfo()
             payload = jsonable(info)
-            profile = payload.get("profile", {}) if isinstance(payload, dict) else {}
-            account.zalo_uid = str(profile.get("userId") or client.uid or "") or None
+            candidate_uid = self.identity_from_payload(payload, client.uid)
+            self.validate_identity(session, account, candidate_uid)
+            account.zalo_uid = candidate_uid
             account.status = "online"
             account.last_seen_at = utcnow()
             account.last_error = None
@@ -607,8 +702,20 @@ class ZaloConnector:
             account.circuit_open_until = None
             session.commit()
             return payload
+        except AccountIdentityError as exc:
+            account.status = "identity_mismatch"
+            account.listener_enabled = False
+            account.last_error = str(exc)[:4000]
+            account.circuit_open_until = None
+            session.commit()
+            raise
         except Exception as exc:
-            self._record_failure(session, account, exc)
+            self._record_failure(
+                session,
+                account,
+                exc,
+                force_session_failure=True,
+            )
             raise
 
     def execute(self, session: Session, account: ZaloAccount, action: str, payload: dict) -> Any:
@@ -1042,9 +1149,9 @@ class ZaloConnector:
         except (TypeError, ValueError):
             repeat_count = 1
         repeat_count = min(max(repeat_count, 1), 5)
-        client = self.client_for(account)
         results = []
         try:
+            client = self.client_for(account)
             source_message = MessageObject.fromDict(message_object, None)
             for index in range(repeat_count):
                 if index:
@@ -1253,12 +1360,13 @@ class ZaloConnector:
                         message=Message(text=text_value) if native_caption else None,
                     )
                 elif kind == "gif":
-                    result = client.sendLocalGif(
-                        str(path),
+                    result, gif_metadata = self._send_local_gif(
+                        client,
+                        path,
                         outbound_media_url(self.settings, upload.id),
                         thread_id,
                         thread_type,
-                        gifName=Path(upload.original_name).name or "sticker.gif",
+                        gif_name=Path(upload.original_name).name or "sticker.gif",
                         width=int(item.get("width") or 500),
                         height=int(item.get("height") or 500),
                     )
@@ -1301,6 +1409,8 @@ class ZaloConnector:
                     )
                 response = ensure_zalo_success(result, f"Gửi {kind}")
                 result_item = {"kind": kind, "count": 1, "result": response}
+                if kind == "gif":
+                    result_item["metadata"] = gif_metadata
                 if video_metadata is not None:
                     result_item["metadata"] = {
                         "width": video_metadata.width,
@@ -1355,9 +1465,9 @@ class ZaloConnector:
         media = payload.get("media") if isinstance(payload.get("media"), dict) else {}
         text_value = str(payload.get("text") or "").strip()
         thread_type = self._thread_type(payload.get("thread_type"))
-        client = self.client_for(account)
-        _limiter(account.id).wait()
         try:
+            client = self.client_for(account)
+            _limiter(account.id).wait()
             if kind == "sticker":
                 sticker_id = int(media.get("sticker_id") or 0)
                 category_id = int(media.get("category_id") or 0)
@@ -1399,12 +1509,13 @@ class ZaloConnector:
                         or outbound_media_url(self.settings, upload.id)
                     )
                     gif_name = Path(upload.original_name).name or "sticker.gif"
-                result = client.sendLocalGif(
-                    str(path),
+                result, gif_metadata = self._send_local_gif(
+                    client,
+                    path,
                     thumbnail_url,
                     thread_id,
                     thread_type,
-                    gifName=gif_name,
+                    gif_name=gif_name,
                     width=int(media.get("width") or 500),
                     height=int(media.get("height") or 500),
                 )
@@ -1444,7 +1555,10 @@ class ZaloConnector:
             }.get(kind, "Gửi nội dung")
             result = ensure_zalo_success(result, operation)
             self._record_success(session, account)
-            return {"kind": kind, "result": result}
+            response = {"kind": kind, "result": result}
+            if kind == "gif":
+                response["metadata"] = gif_metadata
+            return response
         except Exception as exc:
             self._record_failure(session, account, exc)
             raise
@@ -1470,9 +1584,9 @@ class ZaloConnector:
         if parsed.scheme != "https" or not parsed.netloc:
             raise ValueError("Automation sticker URL must use HTTPS")
 
-        client = self.client_for(account)
-        _limiter(account.id).wait()
         try:
+            client = self.client_for(account)
+            _limiter(account.id).wait()
             result = client.sendCustomSticker(
                 thumbnail_url,
                 thumbnail_url,
@@ -1534,6 +1648,58 @@ class ZaloConnector:
             raise
         return metadata, thumbnail
 
+    def _send_local_gif(
+        self,
+        client: ZaloAPI,
+        path: Path,
+        thumbnail_url: str,
+        thread_id: str,
+        thread_type: ThreadType,
+        *,
+        gif_name: str,
+        width: int,
+        height: int,
+    ) -> tuple[Any, dict[str, Any]]:
+        get_limits = getattr(client, "getGifUploadLimits", None)
+        raw_limits = get_limits() if callable(get_limits) else {}
+        raw_limits = raw_limits if isinstance(raw_limits, dict) else {}
+        max_bytes = max(256 * 1024, int(raw_limits.get("max_bytes") or 3 * 1024 * 1024))
+        max_width = max(1, int(raw_limits.get("max_width") or 640))
+        max_height = max(1, int(raw_limits.get("max_height") or 480))
+        prepared: PreparedGif = prepare_gif_for_zalo(
+            path,
+            self.settings.upload_dir,
+            max_bytes=max_bytes,
+            max_width=max_width,
+            max_height=max_height,
+            supplied_width=width,
+            supplied_height=height,
+            ffmpeg_path=self.settings.ffmpeg_path,
+            ffprobe_path=self.settings.ffprobe_path,
+            timeout_seconds=self.settings.media_process_timeout_seconds,
+        )
+        try:
+            result = client.sendLocalGif(
+                str(prepared.path),
+                thumbnail_url,
+                thread_id,
+                thread_type,
+                gifName=gif_name,
+                width=prepared.metadata.width,
+                height=prepared.metadata.height,
+            )
+            return result, {
+                "width": prepared.metadata.width,
+                "height": prepared.metadata.height,
+                "size_bytes": prepared.metadata.size_bytes,
+                "original_size_bytes": prepared.original_size_bytes,
+                "optimized": prepared.optimized,
+                "limit_bytes": max_bytes,
+            }
+        finally:
+            if prepared.optimized:
+                prepared.path.unlink(missing_ok=True)
+
     @staticmethod
     def _thread_type(value: Any) -> ThreadType:
         return (
@@ -1592,10 +1758,23 @@ class ZaloConnector:
                 raise
         return path
 
-    def _record_failure(self, session: Session, account: ZaloAccount, exc: Exception) -> None:
+    def _record_failure(
+        self,
+        session: Session,
+        account: ZaloAccount,
+        exc: Exception,
+        *,
+        force_session_failure: bool = False,
+    ) -> None:
         account.circuit_failures += 1
-        account.status = "error"
-        account.last_error = str(exc)[:4000]
+        session_failure = force_session_failure or isinstance(
+            exc,
+            SESSION_FAILURE_TYPES,
+        )
+        if session_failure:
+            account.status = "error"
+            account.listener_enabled = False
+            account.last_error = str(exc)[:4000]
         if account.circuit_failures >= 5:
             account.circuit_open_until = utcnow() + timedelta(minutes=5)
         session.commit()

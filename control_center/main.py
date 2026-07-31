@@ -24,6 +24,7 @@ from .api import router as api_router
 from .auth import get_db, optional_user, require_scope, write_audit
 from .catalog import catalog_payload
 from .config import Settings, get_settings
+from .connector import ZaloConnector
 from .db import Database
 from .event_broker import EventBroker
 from .media import verify_outbound_signature
@@ -154,6 +155,7 @@ def create_app(
     settings.ensure_directories()
     database = database or Database(settings, pool_size=3, max_overflow=1)
     secret_box = SecretBox(settings)
+    zalo_connector = ZaloConnector(settings, secret_box)
     broker = EventBroker(database)
 
     @asynccontextmanager
@@ -177,6 +179,7 @@ def create_app(
     app.state.settings = settings
     app.state.database = database
     app.state.secret_box = secret_box
+    app.state.zalo_connector = zalo_connector
     app.state.event_broker = broker
 
     app.add_middleware(SecurityHeadersMiddleware)
@@ -460,9 +463,10 @@ def create_app(
     def chat_page(request: Request, session: Session = Depends(get_db)):
         context = page_context(request, session, "chat", "ZChat Desk")
         accounts = session.scalars(
-            select(ZaloAccount)
-            .where(ZaloAccount.enabled.is_(True))
-            .order_by(ZaloAccount.name)
+            select(ZaloAccount).order_by(
+                ZaloAccount.enabled.desc(),
+                ZaloAccount.name,
+            )
         ).all()
         context.update(
             accounts=[account_payload(account) for account in accounts],

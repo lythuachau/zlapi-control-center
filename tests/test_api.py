@@ -40,7 +40,7 @@ def test_login_dashboard_and_catalog(client: TestClient):
     assert {"changeGroupDesc", "loginWithQr", "votePoll", "assignTask"} <= unsupported
 
 
-def test_account_secrets_are_never_returned(client: TestClient):
+def test_account_secrets_are_never_returned(client: TestClient, monkeypatch):
     csrf = login(client)
     response = client.post(
         "/api/v1/accounts",
@@ -60,12 +60,25 @@ def test_account_secrets_are_never_returned(client: TestClient):
     listing = client.get("/api/v1/accounts").text
     assert "secret-cookie" not in listing
     assert "imei-value" not in listing
+    with client.app.state.database.session_factory() as session:
+        stored = session.get(ZaloAccount, payload["id"])
+        stored.zalo_uid = "verified-zalo-uid"
+        stored.status = "online"
+        session.commit()
     listener = client.post(
         f"/api/v1/accounts/{payload['id']}/listener/true",
         headers={"X-CSRF-Token": csrf},
     )
     assert listener.status_code == 200
     assert listener.json()["listener_enabled"] is True
+    monkeypatch.setattr(
+        client.app.state.zalo_connector,
+        "probe_session",
+        lambda **_kwargs: (
+            "verified-zalo-uid",
+            {"profile": {"userId": "verified-zalo-uid"}},
+        ),
+    )
     rotated = client.patch(
         f"/api/v1/accounts/{payload['id']}",
         headers={"X-CSRF-Token": csrf},
@@ -73,7 +86,9 @@ def test_account_secrets_are_never_returned(client: TestClient):
     )
     assert rotated.status_code == 200
     assert rotated.json()["listener_enabled"] is False
-    assert rotated.json()["status"] == "unchecked"
+    assert rotated.json()["status"] == "online"
+    assert rotated.json()["identity_verified"] is True
+    assert rotated.json()["history_preserved"] is True
     assert "rotated-secret" not in rotated.text
 
 
@@ -845,6 +860,7 @@ def test_chat_contacts_reads_friend_cache_and_deduplicates_sync_jobs(client: Tes
     with client.app.state.database.session_factory() as session:
         account = session.get(ZaloAccount, account_id)
         account.status = "online"
+        account.listener_enabled = True
         session.add(
             Job(
                 account_id=account_id,
@@ -972,6 +988,7 @@ def test_chat_friend_actions_require_two_step_confirmation_and_are_audited(
     with client.app.state.database.session_factory() as session:
         account = session.get(ZaloAccount, account_id)
         account.status = "online"
+        account.listener_enabled = True
         session.add(
             ZaloContactProfile(
                 account_id=account_id,
@@ -1082,6 +1099,7 @@ def test_chat_friend_request_queues_only_safe_payload(client: TestClient):
     with client.app.state.database.session_factory() as session:
         account = session.get(ZaloAccount, account_id)
         account.status = "online"
+        account.listener_enabled = True
         session.commit()
 
     queued = client.post(
@@ -1125,6 +1143,7 @@ def test_chat_profiles_correct_outgoing_identity_and_enrich_messages(client: Tes
         account = session.get(ZaloAccount, account_id)
         account.status = "online"
         account.zalo_uid = "self-uid"
+        account.listener_enabled = True
         session.add(
             Event(
                 account_id=account_id,
@@ -2003,6 +2022,7 @@ def test_admin_configures_group_mention_sticker_automation(client: TestClient):
         account = session.get(ZaloAccount, account_id)
         account.status = "online"
         account.zalo_uid = "automation-self-uid"
+        account.listener_enabled = True
         session.add(
             Event(
                 account_id=account_id,
@@ -2030,6 +2050,41 @@ def test_admin_configures_group_mention_sticker_automation(client: TestClient):
     assert any(
         item["id"] == "heart" and item["mode"] == "native"
         for item in empty.json()["reactions"]
+    )
+
+    catalog = client.get("/api/v1/chat/reactions/catalog").json()
+    catalog.append(
+        {
+            "id": "custom-ok-automation",
+            "label": "OK mới",
+            "glyph": "OK",
+            "zalo_icon": "OK",
+            "r_type": 159,
+            "source": 6,
+            "mode": "experimental",
+            "quick": True,
+            "enabled": True,
+            "verified": False,
+            "fallback": "none",
+            "locked": False,
+        }
+    )
+    saved_catalog = client.put(
+        "/api/v1/chat/reactions/catalog",
+        headers={"X-CSRF-Token": csrf},
+        json={"items": catalog},
+    )
+    assert saved_catalog.status_code == 200
+    synced = client.get(
+        "/api/v1/chat/automations/mention-sticker",
+        params={"account_id": account_id},
+    )
+    assert synced.status_code == 200
+    assert any(
+        item["id"] == "custom-ok-automation"
+        and item["mode"] == "experimental"
+        and item["verified"] is False
+        for item in synced.json()["reactions"]
     )
 
     configured = client.put(
@@ -2073,7 +2128,7 @@ def test_admin_configures_group_mention_sticker_automation(client: TestClient):
             "trigger_direct_mention": True,
             "trigger_mention_all": False,
             "response_type": "reaction",
-            "reaction_id": "heart",
+            "reaction_id": "custom-ok-automation",
             "reaction_count": 4,
             "cooldown_seconds": 45,
         },
@@ -2081,7 +2136,9 @@ def test_admin_configures_group_mention_sticker_automation(client: TestClient):
     assert reaction_configured.status_code == 200
     reaction_rule = reaction_configured.json()["rule"]
     assert reaction_rule["response_type"] == "reaction"
-    assert reaction_rule["reaction"]["id"] == "heart"
+    assert reaction_rule["reaction"]["id"] == "custom-ok-automation"
+    assert reaction_rule["reaction"]["mode"] == "experimental"
+    assert reaction_rule["reaction"]["verified"] is False
     assert reaction_rule["reaction_count"] == 4
     assert reaction_rule["sticker"] is None
 
@@ -2114,7 +2171,7 @@ def test_admin_configures_group_mention_sticker_automation(client: TestClient):
         assert stored is not None
         assert stored.config["group_ids"] == ["group-automation-1"]
         assert stored.config["response_type"] == "reaction"
-        assert stored.config["reaction"]["id"] == "heart"
+        assert stored.config["reaction"]["id"] == "custom-ok-automation"
         assert stored.config["reaction_count"] == 4
         assert "sticker" not in stored.config
         admin = session.scalar(select(User).where(User.username == "admin"))

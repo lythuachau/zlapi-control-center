@@ -65,6 +65,10 @@ class ZaloAccount(Base, TimestampMixin):
     circuit_failures: Mapped[int] = mapped_column(Integer, default=0)
     circuit_open_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
+    __table_args__ = (
+        Index("uq_zalo_accounts_zalo_uid", "zalo_uid", unique=True),
+    )
+
 
 class ZaloContactProfile(Base):
     __tablename__ = "zalo_contact_profiles"

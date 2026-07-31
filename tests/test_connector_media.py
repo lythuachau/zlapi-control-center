@@ -9,8 +9,10 @@ from sqlalchemy import func, select
 
 from control_center.connector import ZaloConnector, ZaloResponseError
 from control_center.db import Database
+from control_center.gif import GifMetadata, PreparedGif
 from control_center.models import GifLibraryItem, MediaUpload, ZaloAccount, utcnow
 from control_center.video import VideoMetadata
+from zlapi._exception import ZaloLoginError
 
 
 class FakeMediaClient:
@@ -382,6 +384,205 @@ def test_connector_sends_rich_media_and_audio(settings):
     assert client.calls[5][1].startswith(
         f"http://zlapi.example.test/media/outbound/{'f' * 32}"
     )
+    database.dispose()
+
+
+def test_connector_uses_and_removes_optimized_gif_copy(settings, monkeypatch):
+    settings.domain = "zlapi.example.test"
+    settings.ensure_directories()
+    database = Database(settings)
+    database.create_schema()
+    source_path = settings.upload_dir / "large.gif"
+    optimized_path = settings.upload_dir / "optimized.gif"
+    source_path.write_bytes(b"large-gif-fixture")
+    optimized_path.write_bytes(b"optimized-gif-fixture")
+    client = FakeMediaClient()
+    client.getGifUploadLimits = lambda: {
+        "max_bytes": 3 * 1024 * 1024,
+        "max_width": 640,
+        "max_height": 480,
+    }
+    connector = ZaloConnector(settings, object())
+    connector.client_for = lambda _account: client
+
+    monkeypatch.setattr(
+        "control_center.connector.prepare_gif_for_zalo",
+        lambda *_args, **_kwargs: PreparedGif(
+            path=optimized_path,
+            metadata=GifMetadata(
+                width=480,
+                height=360,
+                duration_ms=1200,
+                frame_count=18,
+                size_bytes=optimized_path.stat().st_size,
+            ),
+            optimized=True,
+            original_size_bytes=source_path.stat().st_size,
+        ),
+    )
+
+    with database.session_factory() as session:
+        account = ZaloAccount(
+            name="Optimized GIF connector",
+            cookie_cipher="unused",
+            imei_cipher="unused",
+            status="online",
+            enabled=True,
+        )
+        session.add(account)
+        session.flush()
+        session.add(
+            MediaUpload(
+                id="9" * 32,
+                original_name="large.gif",
+                stored_path=str(source_path),
+                size_bytes=source_path.stat().st_size,
+                content_type="image/gif",
+                expires_at=utcnow() + timedelta(days=1),
+            )
+        )
+        session.commit()
+        result = connector.send_chat_rich_media(
+            session,
+            account,
+            {
+                "thread_id": "destination",
+                "thread_type": "user",
+                "kind": "gif",
+                "media": {
+                    "upload_token": f"upload:{'9' * 32}",
+                    "width": 900,
+                    "height": 700,
+                },
+            },
+        )
+
+    assert client.calls[0][0:2] == ("gif", str(optimized_path))
+    assert client.calls[0][5]["width"] == 480
+    assert client.calls[0][5]["height"] == 360
+    assert result["metadata"]["optimized"] is True
+    assert not optimized_path.exists()
+    assert source_path.exists()
+    database.dispose()
+
+
+def test_rich_media_failure_keeps_connected_account_online(settings, monkeypatch):
+    settings.domain = "zlapi.example.test"
+    settings.ensure_directories()
+    database = Database(settings)
+    database.create_schema()
+    gif_path = settings.upload_dir / "rejected.gif"
+    gif_path.write_bytes(b"gif-fixture")
+    client = FakeMediaClient()
+    client.sendLocalGif = lambda *_args, **_kwargs: {
+        "error_code": 115,
+        "error_message": "upload failed",
+        "data": None,
+    }
+    connector = ZaloConnector(settings, object())
+    connector.client_for = lambda _account: client
+    monkeypatch.setattr(
+        "control_center.connector.prepare_gif_for_zalo",
+        lambda *_args, **_kwargs: PreparedGif(
+            path=gif_path,
+            metadata=GifMetadata(
+                width=320,
+                height=240,
+                duration_ms=1000,
+                frame_count=12,
+                size_bytes=gif_path.stat().st_size,
+            ),
+            optimized=False,
+            original_size_bytes=gif_path.stat().st_size,
+        ),
+    )
+
+    with database.session_factory() as session:
+        account = ZaloAccount(
+            name="Rejected GIF connector",
+            cookie_cipher="unused",
+            imei_cipher="unused",
+            status="online",
+            enabled=True,
+            listener_enabled=True,
+        )
+        session.add(account)
+        session.add(
+            MediaUpload(
+                id="8" * 32,
+                original_name="rejected.gif",
+                stored_path=str(gif_path),
+                size_bytes=gif_path.stat().st_size,
+                content_type="image/gif",
+                expires_at=utcnow() + timedelta(days=1),
+            )
+        )
+        session.commit()
+
+        with pytest.raises(ZaloResponseError, match=r"Zalo #115"):
+            connector.send_chat_rich_media(
+                session,
+                account,
+                {
+                    "thread_id": "destination",
+                    "thread_type": "user",
+                    "kind": "gif",
+                    "media": {"upload_token": f"upload:{'8' * 32}"},
+                },
+            )
+
+        session.refresh(account)
+        assert account.status == "online"
+        assert account.listener_enabled is True
+        assert account.last_error is None
+        assert account.circuit_failures == 1
+
+    database.dispose()
+
+
+def test_rich_media_login_failure_disables_listener(settings):
+    database = Database(settings)
+    database.create_schema()
+    connector = ZaloConnector(settings, object())
+
+    def reject_login(_account):
+        raise ZaloLoginError("session expired")
+
+    connector.client_for = reject_login
+
+    with database.session_factory() as session:
+        account = ZaloAccount(
+            name="Expired rich media connector",
+            cookie_cipher="unused",
+            imei_cipher="unused",
+            status="online",
+            enabled=True,
+            listener_enabled=True,
+        )
+        session.add(account)
+        session.commit()
+
+        with pytest.raises(ZaloLoginError, match="session expired"):
+            connector.send_chat_rich_media(
+                session,
+                account,
+                {
+                    "thread_id": "destination",
+                    "thread_type": "user",
+                    "kind": "sticker",
+                    "media": {
+                        "sticker_id": 123,
+                        "category_id": 456,
+                    },
+                },
+            )
+
+        session.refresh(account)
+        assert account.status == "error"
+        assert account.listener_enabled is False
+        assert account.last_error == "session expired"
+        assert account.circuit_failures == 1
+
     database.dispose()
 
 

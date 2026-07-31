@@ -56,7 +56,9 @@ def _rule_config(*, direct: bool = True, mention_all: bool = False) -> dict:
     }
 
 
-def _reaction_rule_config(*, count: int = 3) -> dict:
+def _reaction_rule_config(
+    *, count: int = 3, mode: str = "native", verified: bool = True
+) -> dict:
     config = _rule_config()
     config.update(
         {
@@ -69,8 +71,8 @@ def _reaction_rule_config(*, count: int = 3) -> dict:
                 "zalo_icon": "/-heart",
                 "r_type": 5,
                 "source": 6,
-                "mode": "native",
-                "verified": True,
+                "mode": mode,
+                "verified": verified,
             },
         }
     )
@@ -251,7 +253,9 @@ def test_listener_queues_configured_reaction_count_for_tagged_message(settings):
                 kind=MENTION_STICKER_KIND,
                 name="Tag nhóm → Phản hồi",
                 enabled=True,
-                config=_reaction_rule_config(count=4),
+                config=_reaction_rule_config(
+                    count=4, mode="experimental", verified=False
+                ),
             )
         )
         session.commit()
@@ -271,6 +275,7 @@ def test_listener_queues_configured_reaction_count_for_tagged_message(settings):
         assert job is not None
         assert job.payload["repeatCount"] == 4
         assert job.payload["reactionIcon"] == "/-heart"
+        assert job.payload["_chat_context"]["reaction_id"] == "heart"
         assert job.payload["_chat_context"]["fallback"] == "none"
         run = session.scalar(select(AutomationRun).where(AutomationRun.job_id == job.id))
         assert run is not None

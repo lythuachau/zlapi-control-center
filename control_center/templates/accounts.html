@@ -15,7 +15,7 @@
         <tr>
           <td><strong>{{ account.name }}</strong><small class="block text-muted">{{ account.id[:8] }}</small></td>
           <td class="font-mono text-xs">{{ account.zalo_uid or 'Chưa xác định' }}</td>
-          <td><span class="badge-{{ 'online' if account.listener_enabled else 'offline' }}"><span class="dot"></span>{{ 'Bật' if account.listener_enabled else 'Tắt' }}</span>{% if account.status == 'error' and not account.listener_enabled %}<small class="mt-1 block text-amber-500">Chờ admin cập nhật phiên</small>{% endif %}</td>
+          <td><span class="badge-{{ 'online' if account.listener_enabled else 'offline' }}"><span class="dot"></span>{{ 'Bật' if account.listener_enabled else 'Tắt' }}</span>{% if account.status in ['error', 'identity_mismatch'] and not account.listener_enabled %}<small class="mt-1 block text-amber-500">{% if 'another web connection is active' in (account.last_error or '')|lower %}Đóng kết nối Zalo Web khác rồi kiểm tra lại{% elif account.status == 'identity_mismatch' %}Sai tài khoản Zalo · lịch sử chưa bị thay đổi{% else %}Chờ admin cập nhật phiên{% endif %}</small>{% endif %}</td>
           <td><span class="badge-{{ account.status }}"><span class="dot"></span>{{ account.status }}</span>{% if account.last_error %}<small class="mt-1 block max-w-xs truncate text-rose-500">{{ account.last_error }}</small>{% endif %}</td>
           <td class="text-muted">{{ account.last_seen_at.strftime('%H:%M %d/%m') if account.last_seen_at else '—' }}</td>
           <td class="text-right">
@@ -48,7 +48,7 @@
       </div>
       <div class="field"><label for="account-cookies">Giá trị cookie <code>zpw_sek</code></label><input class="input font-mono text-xs" id="account-cookies" name="cookies" type="password" required autocomplete="off" spellcheck="false" placeholder="Dán giá trị nằm sau zpw_sek="><p class="mt-1.5 text-xs text-muted">Chỉ cần dán phần giá trị cookie. Hệ thống sẽ tự tạo <code>{"zpw_sek":"GIÁ_TRỊ_COOKIE"}</code>. JSON hoặc chuỗi Cookie đầy đủ vẫn được hỗ trợ.</p></div>
       <div class="field"><label for="account-agent">User-Agent <span class="text-muted">(không bắt buộc)</span></label><input class="input" id="account-agent" name="user_agent"></div>
-      <label class="flex items-center gap-3 rounded-xl border p-4"><input type="checkbox" name="listener_enabled" class="h-4 w-4 accent-teal-500"><span><strong class="block text-sm">Bật listener sau khi kiểm tra</strong><small class="text-muted">Service sẽ tự kết nối khi phiên hợp lệ.</small></span></label>
+      <div class="rounded-xl border border-sky-500/30 bg-sky-500/10 p-4 text-sm text-sky-600"><strong>Listener luôn được giữ tắt khi thêm mới.</strong> Hãy bấm “Kiểm tra” để khóa đúng Zalo UID, sau đó mới bật Listener.</div>
       <div class="flex justify-end gap-3"><button class="btn-secondary" data-close-modal type="button">Hủy</button><button class="btn-primary" type="submit">Lưu tài khoản</button></div>
     </form>
   </section>
@@ -59,10 +59,10 @@
     <div class="panel-header"><div><h2 id="session-modal-title" class="font-semibold">Cập nhật phiên Zalo</h2><p class="text-sm text-muted">Tài khoản: <strong id="session-account-name" class="text-main"></strong></p></div><button class="icon-btn" data-close-modal type="button">×</button></div>
     <form id="session-form" class="space-y-5 p-5">
       <input id="session-account-id" name="account_id" type="hidden">
-      <div class="field"><label for="session-cookies">Giá trị cookie <code>zpw_sek</code></label><input class="input font-mono text-xs" id="session-cookies" name="cookies" type="password" required autocomplete="off" spellcheck="false" placeholder="Dán giá trị cookie mới"><p class="mt-1.5 text-xs text-muted">Hệ thống tự chuyển thành <code>{"zpw_sek":"GIÁ_TRỊ_COOKIE"}</code> và không tự bật lại listener.</p></div>
+      <div class="field"><label for="session-cookies">Giá trị cookie <code>zpw_sek</code></label><input class="input font-mono text-xs" id="session-cookies" name="cookies" type="password" required autocomplete="off" spellcheck="false" placeholder="Dán giá trị cookie mới"><p class="mt-1.5 text-xs text-muted">Hệ thống sẽ đăng nhập thử và đối chiếu Zalo UID trước khi thay phiên. Cookie cũ không bị ghi đè nếu thông tin mới không hợp lệ.</p></div>
       <div class="field"><label for="session-imei">IMEI mới <span class="text-muted">(để trống nếu không đổi)</span></label><input class="input" id="session-imei" name="imei" autocomplete="off"></div>
-      <div class="rounded-xl border border-amber-500/30 bg-amber-500/10 p-4 text-sm text-amber-600">Sau khi cập nhật, hãy bấm <strong>Kiểm tra</strong>. Chỉ bật lại listener khi tài khoản đã online.</div>
-      <div class="flex justify-end gap-3"><button class="btn-secondary" data-close-modal type="button">Hủy</button><button class="btn-primary" type="submit">Lưu phiên mới</button></div>
+      <div class="rounded-xl border border-amber-500/30 bg-amber-500/10 p-4 text-sm text-amber-600"><strong>Lịch sử chat vẫn được giữ nguyên.</strong> Khi UID khớp, hệ thống đồng bộ bù các tin gần nhất và vẫn để listener tắt để bạn chủ động bật lại.</div>
+      <div class="flex justify-end gap-3"><button class="btn-secondary" data-close-modal type="button">Hủy</button><button class="btn-primary" type="submit">Xác minh &amp; lưu phiên</button></div>
     </form>
   </section>
 </div>
@@ -72,7 +72,7 @@
     <div class="panel-header"><div><h2 id="delete-account-modal-title" class="font-semibold text-rose-500">Xóa tài khoản Zalo</h2><p class="text-sm text-muted">Tài khoản: <strong id="delete-account-name" class="text-main"></strong></p></div><button class="icon-btn" data-close-modal type="button">×</button></div>
     <form id="delete-account-form" class="space-y-5 p-5">
       <input id="delete-account-id" name="account_id" type="hidden">
-      <div class="rounded-xl border border-rose-500/30 bg-rose-500/10 p-4 text-sm text-rose-500">Cookie và IMEI sẽ bị xóa vĩnh viễn. Job đang chờ sẽ bị hủy; lịch sử job, event và audit vẫn được giữ.</div>
+      <div class="rounded-xl border border-rose-500/30 bg-rose-500/10 p-4 text-sm text-rose-500"><strong>Không dùng thao tác này khi chỉ bị mất kết nối.</strong> Hãy dùng “Cập nhật phiên” để giữ lịch sử liền mạch. Xóa tài khoản sẽ xóa cookie/IMEI và làm lịch sử chat cũ không còn mở được trong ZChat.</div>
       <div class="field"><label for="delete-account-confirmation">Nhập chính xác tên tài khoản để xác nhận</label><input class="input" id="delete-account-confirmation" name="confirmation" required autocomplete="off" spellcheck="false"></div>
       <label class="flex items-start gap-3 rounded-xl border p-4"><input id="delete-account-final" name="final_confirmation" type="checkbox" required class="mt-1 h-4 w-4 accent-teal-500"><span><strong class="block text-sm">Tôi hiểu thao tác này không thể hoàn tác</strong><small class="text-muted">Đây là bước xác nhận cuối cùng trước khi xóa.</small></span></label>
       <div class="flex justify-end gap-3"><button class="btn-secondary" data-close-modal type="button">Hủy</button><button class="btn-danger" type="submit">Xóa vĩnh viễn</button></div>

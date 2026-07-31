@@ -2,11 +2,13 @@
 param(
     [string]$SourcePath = (Resolve-Path (Join-Path $PSScriptRoot "..\..")).Path,
     [string]$ServiceRoot = "C:\Services\ZlapiControl",
+    [string]$PythonPath = "python",
     [switch]$SkipServiceRestart
 )
 
 $ErrorActionPreference = "Stop"
 Set-StrictMode -Version Latest
+. (Join-Path $PSScriptRoot "Service-ProcessHelpers.ps1")
 
 function Assert-NativeSuccess([string]$Step) {
     if ($LASTEXITCODE -ne 0) {
@@ -22,59 +24,14 @@ function Remove-VerifiedJunction([string]$Path) {
     [IO.Directory]::Delete($item.FullName)
 }
 
-function Restart-ServiceSafely([string]$Name, [int]$TimeoutSeconds = 30) {
-    $service = Get-Service -Name $Name -ErrorAction SilentlyContinue
-    if (-not $service) {
-        return
-    }
-    if ($service.Status -ne [ServiceProcess.ServiceControllerStatus]::Stopped) {
-        & sc.exe stop $Name | Out-Null
-        try {
-            $service.WaitForStatus(
-                [ServiceProcess.ServiceControllerStatus]::Stopped,
-                [TimeSpan]::FromSeconds($TimeoutSeconds)
-            )
-        }
-        catch {
-            $service.Refresh()
-            if ($service.Status -ne [ServiceProcess.ServiceControllerStatus]::Stopped) {
-                $serviceInfo = Get-CimInstance Win32_Service -Filter "Name='$Name'"
-                $servicePid = [int]$serviceInfo.ProcessId
-                if ($servicePid -gt 0) {
-                    Write-Warning "Service $Name did not stop within $TimeoutSeconds seconds; terminating its process tree."
-                    & taskkill.exe /PID $servicePid /T /F | Out-Null
-                }
-                else {
-                    # WinSW can reach Stopped between WaitForStatus timing out and
-                    # Win32_Service being queried. Give SCM one final refresh before
-                    # treating a zero process ID as an actual failure.
-                    Start-Sleep -Milliseconds 750
-                    $service.Refresh()
-                    if ($service.Status -ne [ServiceProcess.ServiceControllerStatus]::Stopped) {
-                        throw "Service $Name did not stop and has no process ID to terminate."
-                    }
-                }
-                $service = Get-Service -Name $Name
-                if ($service.Status -ne [ServiceProcess.ServiceControllerStatus]::Stopped) {
-                    $service.WaitForStatus(
-                        [ServiceProcess.ServiceControllerStatus]::Stopped,
-                        [TimeSpan]::FromSeconds(15)
-                    )
-                }
-            }
-        }
-    }
-    Start-Service -Name $Name
-    $service = Get-Service -Name $Name
-    $service.WaitForStatus(
-        [ServiceProcess.ServiceControllerStatus]::Running,
-        [TimeSpan]::FromSeconds(30)
-    )
-}
-
 $source = (Resolve-Path -LiteralPath $SourcePath).Path
 if (-not (Test-Path -LiteralPath (Join-Path $source "pyproject.toml"))) {
     throw "SourcePath does not contain pyproject.toml."
+}
+$pythonCommand = Get-Command $PythonPath -CommandType Application -ErrorAction Stop
+$pythonExecutable = $pythonCommand.Source
+if (-not (Test-Path -LiteralPath $pythonExecutable)) {
+    throw "PythonPath does not point to an executable: $PythonPath"
 }
 
 $releases = Join-Path $ServiceRoot "releases"
@@ -90,7 +47,7 @@ if (-not (Test-Path -LiteralPath (Join-Path $shared ".env"))) {
 }
 
 New-Item -ItemType Directory -Path $release -Force | Out-Null
-$null = robocopy.exe $source $release /E /XD .git node_modules .data __pycache__ .pytest_cache .ruff_cache chat-ui-concepts /XF *.pyc
+$null = robocopy.exe $source $release /E /XD .git .venv node_modules .data __pycache__ .pytest_cache .ruff_cache chat-ui-concepts /XF *.pyc
 if ($LASTEXITCODE -gt 7) {
     throw "Robocopy failed with exit code $LASTEXITCODE."
 }
@@ -102,7 +59,7 @@ try {
     Assert-NativeSuccess "npm ci"
     npm run build
     Assert-NativeSuccess "Frontend asset build"
-    python -m venv .venv
+    & $pythonExecutable -m venv .venv
     Assert-NativeSuccess "Virtual environment creation"
     & ".\.venv\Scripts\python.exe" -m pip install --upgrade pip
     Assert-NativeSuccess "pip upgrade"
@@ -121,23 +78,54 @@ finally {
     Pop-Location
 }
 
+$serviceModules = @{
+    "zlapi-web" = "uvicorn"
+    "zlapi-worker" = "control_center.worker"
+    "zlapi-listener" = "control_center.listener"
+}
+$stopOrder = @("zlapi-listener", "zlapi-worker", "zlapi-web")
+$startOrder = @("zlapi-web", "zlapi-worker", "zlapi-listener")
 $previousTarget = $null
 if (Test-Path -LiteralPath $current) {
     $currentItem = Get-Item -LiteralPath $current -Force
     if (-not ($currentItem.Attributes -band [IO.FileAttributes]::ReparsePoint)) {
         throw "$current exists but is not a junction; refusing to replace it."
     }
-    $previousTarget = $currentItem.Target
-    Remove-VerifiedJunction $current
+    $previousTarget = [string]$currentItem.Target
 }
-New-Item -ItemType Junction -Path $current -Target $release | Out-Null
 
+$junctionChanged = $false
 try {
     if (-not $SkipServiceRestart) {
-        foreach ($serviceId in @("zlapi-web", "zlapi-worker", "zlapi-listener")) {
-            Restart-ServiceSafely -Name $serviceId
-            Start-Sleep -Seconds 2
+        foreach ($serviceId in $stopOrder) {
+            $module = if ($serviceModules.ContainsKey($serviceId)) { $serviceModules[$serviceId] } else { "" }
+            Stop-ZlapiServiceSafely -Name $serviceId -ServiceRoot $ServiceRoot -Module $module
         }
+    }
+
+    if (Test-Path -LiteralPath $current) {
+        Remove-VerifiedJunction $current
+        $junctionChanged = $true
+    }
+    New-Item -ItemType Junction -Path $current -Target $release | Out-Null
+    $junctionChanged = $true
+
+    if (-not $SkipServiceRestart) {
+        foreach ($serviceId in $startOrder) {
+            $module = if ($serviceModules.ContainsKey($serviceId)) { $serviceModules[$serviceId] } else { "" }
+            if (-not [string]::IsNullOrWhiteSpace($module)) {
+                # A final scoped cleanup closes the race between stop and start.
+                Remove-ZlapiOrphanModuleProcesses -Module $module -ServiceRoot $ServiceRoot
+            }
+            Start-ZlapiServiceSafely -Name $serviceId
+            if (-not [string]::IsNullOrWhiteSpace($module)) {
+                Assert-ZlapiSingleServiceModuleProcess `
+                    -ServiceName $serviceId `
+                    -Module $module `
+                    -ServiceRoot $ServiceRoot
+            }
+        }
+
         $healthy = $false
         foreach ($attempt in 1..12) {
             try {
@@ -157,17 +145,43 @@ try {
     }
 }
 catch {
-    if (Test-Path -LiteralPath $current) {
-        Remove-VerifiedJunction $current
-    }
-    if ($previousTarget) {
-        $resolvedPrevious = (Resolve-Path -LiteralPath $previousTarget).Path
-        if (-not $resolvedPrevious.StartsWith((Resolve-Path -LiteralPath $releases).Path, [StringComparison]::OrdinalIgnoreCase)) {
-            throw "Previous release target is outside the releases directory."
+    if (-not $SkipServiceRestart) {
+        foreach ($serviceId in $stopOrder) {
+            $module = if ($serviceModules.ContainsKey($serviceId)) { $serviceModules[$serviceId] } else { "" }
+            try {
+                Stop-ZlapiServiceSafely -Name $serviceId -ServiceRoot $ServiceRoot -Module $module
+            }
+            catch {
+                Write-Warning "Rollback cleanup for $serviceId failed: $($_.Exception.Message)"
+            }
         }
-        New-Item -ItemType Junction -Path $current -Target $resolvedPrevious | Out-Null
-        foreach ($serviceId in @("zlapi-web", "zlapi-worker", "zlapi-listener")) {
-            Restart-ServiceSafely -Name $serviceId
+    }
+
+    if ($previousTarget) {
+        if ($junctionChanged) {
+            if (Test-Path -LiteralPath $current) {
+                Remove-VerifiedJunction $current
+            }
+            $resolvedPrevious = (Resolve-Path -LiteralPath $previousTarget).Path
+            if (-not (Test-ZlapiPathWithinRoot -Path $resolvedPrevious -Root $releases)) {
+                throw "Previous release target is outside the releases directory."
+            }
+            New-Item -ItemType Junction -Path $current -Target $resolvedPrevious | Out-Null
+        }
+        if (-not $SkipServiceRestart) {
+            foreach ($serviceId in $startOrder) {
+                $module = if ($serviceModules.ContainsKey($serviceId)) { $serviceModules[$serviceId] } else { "" }
+                if (-not [string]::IsNullOrWhiteSpace($module)) {
+                    Remove-ZlapiOrphanModuleProcesses -Module $module -ServiceRoot $ServiceRoot
+                }
+                Start-ZlapiServiceSafely -Name $serviceId
+                if (-not [string]::IsNullOrWhiteSpace($module)) {
+                    Assert-ZlapiSingleServiceModuleProcess `
+                        -ServiceName $serviceId `
+                        -Module $module `
+                        -ServiceRoot $ServiceRoot
+                }
+            }
         }
     }
     throw

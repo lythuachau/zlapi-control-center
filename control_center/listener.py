@@ -16,7 +16,9 @@ from .automations import queue_mention_sticker_automation
 from .config import get_settings
 from .connector import jsonable
 from .db import Database
+from .history_sync import queue_history_sync
 from .models import Event, Job, ZaloAccount, utcnow
+from .process_lock import ProcessAlreadyRunningError, ProcessSingleton
 from .profiles import profile_ids_needing_refresh
 from .security import SecretBox
 
@@ -129,10 +131,15 @@ def store_listener_event(
     event_type: str,
     payload: dict,
     thread_id: str | None = None,
+    *,
+    created_at=None,
+    dedupe_key_override: str | None = None,
+    process_message_side_effects: bool = True,
+    update_account_heartbeat: bool = True,
 ) -> bool:
     normalized_payload = jsonable(payload)
     normalized_thread_id = str(thread_id) if thread_id is not None else None
-    dedupe_key = listener_event_dedupe_key(
+    dedupe_key = dedupe_key_override or listener_event_dedupe_key(
         event_type,
         normalized_thread_id,
         normalized_payload,
@@ -147,21 +154,28 @@ def store_listener_event(
                 )
             )
             if existing is not None:
-                _mark_account_online(session, account_id)
+                if update_account_heartbeat:
+                    _mark_account_online(session, account_id)
                 session.commit()
                 return False
+        event_values = {
+            "account_id": account_id,
+            "event_type": event_type,
+            "thread_id": normalized_thread_id,
+            "dedupe_key": dedupe_key,
+            "payload": normalized_payload,
+        }
+        if created_at is not None:
+            event_values["created_at"] = created_at
         event = Event(
-            account_id=account_id,
-            event_type=event_type,
-            thread_id=normalized_thread_id,
-            dedupe_key=dedupe_key,
-            payload=normalized_payload,
+            **event_values,
         )
         session.add(event)
         try:
             session.flush()
-            _mark_account_online(session, account_id)
-            if event_type == "message.received":
+            if update_account_heartbeat:
+                _mark_account_online(session, account_id)
+            if event_type == "message.received" and process_message_side_effects:
                 account = session.get(ZaloAccount, account_id)
                 if account:
                     try:
@@ -197,9 +211,10 @@ def store_listener_event(
 
     # Another callback may have inserted the same event between the lookup and
     # commit. Keep the listener healthy and still refresh the account heartbeat.
-    with database.session_factory() as session:
-        _mark_account_online(session, account_id)
-        session.commit()
+    if update_account_heartbeat:
+        with database.session_factory() as session:
+            _mark_account_online(session, account_id)
+            session.commit()
     return False
 
 
@@ -211,6 +226,9 @@ def record_listener_failure(
     timestamp=None,
 ) -> None:
     error_text = str(error)
+    duplicate_connection = (
+        "another web connection is active" in error_text.casefold()
+    )
     with database.session_factory() as session:
         account = session.get(ZaloAccount, account_id)
         if account:
@@ -225,7 +243,10 @@ def record_listener_failure(
                     "error": error_text,
                     "timestamp": timestamp,
                     "listener_disabled": True,
-                    "requires_admin_credentials_update": True,
+                    "requires_admin_credentials_update": not duplicate_connection,
+                    "failure_kind": (
+                        "duplicate_listener" if duplicate_connection else "session_or_network"
+                    ),
                 },
             )
         )
@@ -249,7 +270,24 @@ class ManagedZaloClient(ZaloAPI):
 
     def onListening(self):
         self._event("listener.connected", {"status": "connected"})
+        self._queue_recent_history_sync()
         self._sync_group_metadata()
+
+    def _queue_recent_history_sync(self) -> None:
+        try:
+            with self.database.session_factory() as session:
+                queue_history_sync(
+                    session,
+                    account_id=self.managed_account_id,
+                    reason="listener_connected",
+                )
+                session.commit()
+        except Exception as exc:
+            logger.warning(
+                "Could not queue history sync for account %s: %s",
+                self.managed_account_id,
+                exc,
+            )
 
     def _sync_group_metadata(self) -> None:
         cutoff = utcnow() - timedelta(hours=1)
@@ -368,6 +406,8 @@ class ManagedZaloClient(ZaloAPI):
 @dataclass
 class ListenerHandle:
     thread: threading.Thread
+    generation: int
+    cancel_event: threading.Event
     client: ManagedZaloClient | None = None
 
 
@@ -380,21 +420,126 @@ class ListenerSupervisor:
         self.stop_event = threading.Event()
         self.handles: dict[str, ListenerHandle] = {}
         self.lock = threading.Lock()
+        self.next_generation = 0
 
     def stop(self, *_args) -> None:
         self.stop_event.set()
+        clients = []
+        with self.lock:
+            for handle in self.handles.values():
+                handle.cancel_event.set()
+                if handle.client:
+                    clients.append(handle.client)
+        for client in clients:
+            client.stopListening()
+
+    def _next_generation(self) -> int:
+        self.next_generation += 1
+        return self.next_generation
+
+    def _new_handle(self, account_id: str) -> ListenerHandle:
+        generation = self._next_generation()
+        cancel_event = threading.Event()
+        thread = threading.Thread(
+            target=self._run_account,
+            args=(account_id, generation, cancel_event),
+            daemon=True,
+            name=f"zalo-listener-{account_id[:8]}-{generation}",
+        )
+        return ListenerHandle(
+            thread=thread,
+            generation=generation,
+            cancel_event=cancel_event,
+        )
+
+    @staticmethod
+    def _stop_clients(clients: list[ManagedZaloClient]) -> None:
+        for client in clients:
+            client.stopListening()
+
+    def _cancel_handle(
+        self,
+        handle: ListenerHandle,
+        clients_to_stop: list[ManagedZaloClient],
+    ) -> None:
+        if handle.cancel_event.is_set():
+            return
+        handle.cancel_event.set()
+        if handle.client:
+            clients_to_stop.append(handle.client)
+
+    def _handle_is_current(
+        self,
+        account_id: str,
+        generation: int,
+        cancel_event: threading.Event,
+    ) -> ListenerHandle | None:
+        handle = self.handles.get(account_id)
+        if (
+            handle is None
+            or handle.generation != generation
+            or handle.cancel_event is not cancel_event
+        ):
+            return None
+        return handle
+
+    def _should_start_client(
+        self,
+        account_id: str,
+        generation: int,
+        cancel_event: threading.Event,
+        client: ManagedZaloClient,
+    ) -> bool:
+        with self.lock:
+            handle = self._handle_is_current(
+                account_id,
+                generation,
+                cancel_event,
+            )
+            if (
+                handle is None
+                or cancel_event.is_set()
+                or self.stop_event.is_set()
+            ):
+                return False
+            handle.client = client
+            return True
+
+    def _clear_client(
+        self,
+        account_id: str,
+        generation: int,
+        cancel_event: threading.Event,
+        client: ManagedZaloClient,
+    ) -> None:
+        with self.lock:
+            handle = self._handle_is_current(
+                account_id,
+                generation,
+                cancel_event,
+            )
+            if handle and handle.client is client:
+                handle.client = None
+
+    def _join_handles(self) -> None:
         with self.lock:
             handles = list(self.handles.values())
         for handle in handles:
-            if handle.client:
-                handle.client.stopListening()
+            handle.thread.join(timeout=10)
+
+    def _cancel_all_handles(self) -> None:
+        clients = []
+        with self.lock:
+            for handle in self.handles.values():
+                self._cancel_handle(handle, clients)
+        self._stop_clients(clients)
 
     def run(self) -> None:
         while not self.stop_event.is_set():
             self.reconcile()
             self.stop_event.wait(10)
-        for handle in list(self.handles.values()):
-            handle.thread.join(timeout=10)
+        self._cancel_all_handles()
+        self._join_handles()
         self.database.dispose()
 
     def reconcile(self) -> None:
@@ -405,28 +550,35 @@ class ListenerSupervisor:
                     select(ZaloAccount).where(
                         ZaloAccount.enabled.is_(True),
                         ZaloAccount.listener_enabled.is_(True),
+                        ZaloAccount.zalo_uid.is_not(None),
+                        ZaloAccount.status == "online",
                     )
                 ).all()
             }
+        clients_to_stop: list[ManagedZaloClient] = []
         with self.lock:
             for account_id, handle in list(self.handles.items()):
-                if account_id not in desired or not handle.thread.is_alive():
-                    if handle.client:
-                        handle.client.stopListening()
+                if not handle.thread.is_alive():
                     self.handles.pop(account_id, None)
+                    continue
+                if account_id not in desired:
+                    self._cancel_handle(handle, clients_to_stop)
             for account_id in desired - set(self.handles):
-                thread = threading.Thread(
-                    target=self._run_account,
-                    args=(account_id,),
-                    daemon=True,
-                    name=f"zalo-listener-{account_id[:8]}",
-                )
-                self.handles[account_id] = ListenerHandle(thread=thread)
-                thread.start()
+                handle = self._new_handle(account_id)
+                self.handles[account_id] = handle
+                handle.thread.start()
+        self._stop_clients(clients_to_stop)
 
-    def _run_account(self, account_id: str) -> None:
+    def _run_account(
+        self,
+        account_id: str,
+        generation: int,
+        cancel_event: threading.Event,
+    ) -> None:
         client = None
         try:
+            if self.stop_event.is_set() or cancel_event.is_set():
+                return
             with self.database.session_factory() as session:
                 account = session.get(ZaloAccount, account_id)
                 if account is None:
@@ -444,19 +596,36 @@ class ListenerSupervisor:
                 user_agent=user_agent,
                 auto_login=True,
             )
-            with self.lock:
-                handle = self.handles.get(account_id)
-                if handle:
-                    handle.client = client
-            if self.stop_event.is_set():
+            if not self._should_start_client(
+                account_id,
+                generation,
+                cancel_event,
+                client,
+            ):
                 return
-            client.listen(type="websocket", run_forever=False, reconnect=5)
+            # A newly-created client starts with a clear stop event. Do not
+            # reset it here: cancellation may race with the end of auto-login.
+            client.listen(
+                type="websocket",
+                run_forever=False,
+                reconnect=5,
+                reset_stop=False,
+            )
         except Exception as exc:
-            logger.exception("Listener failed for account %s", account_id)
-            record_listener_failure(self.database, account_id, exc)
+            if self.stop_event.is_set() or cancel_event.is_set():
+                logger.info("Listener stopped for account %s", account_id)
+            else:
+                logger.exception("Listener failed for account %s", account_id)
+                record_listener_failure(self.database, account_id, exc)
         finally:
             if client:
                 client.stopListening()
+                self._clear_client(
+                    account_id,
+                    generation,
+                    cancel_event,
+                    client,
+                )
 
 
 def main() -> None:
@@ -464,11 +633,26 @@ def main() -> None:
         level=logging.INFO,
         format="%(asctime)s %(levelname)s %(name)s %(message)s",
     )
-    supervisor = ListenerSupervisor()
-    signal.signal(signal.SIGINT, supervisor.stop)
-    if hasattr(signal, "SIGTERM"):
-        signal.signal(signal.SIGTERM, supervisor.stop)
-    supervisor.run()
+    settings = get_settings()
+    settings.ensure_directories()
+    singleton = ProcessSingleton(
+        settings.data_dir / "run" / "listener.lock",
+        role="listener",
+    )
+    try:
+        singleton.acquire()
+    except ProcessAlreadyRunningError as exc:
+        logger.error("%s; refusing to start a duplicate service", exc)
+        return
+
+    try:
+        supervisor = ListenerSupervisor()
+        signal.signal(signal.SIGINT, supervisor.stop)
+        if hasattr(signal, "SIGTERM"):
+            signal.signal(signal.SIGTERM, supervisor.stop)
+        supervisor.run()
+    finally:
+        singleton.release()
 
 
 if __name__ == "__main__":

@@ -61,7 +61,8 @@ DEFAULT_REACTIONS: list[dict[str, Any]] = [
     _native_reaction("sun", "Tỏa sáng", "☀️", "/-li", 67),
     _native_reaction("birthday", "Sinh nhật", "🎂", "/-bd", 126),
     _native_reaction("bomb", "Bùng nổ", "💣", "/-bome", 127),
-    _native_reaction("ok", "OK", "👌", "/-ok", 68),
+    # Zalo renders this legacy reaction as the "OK" wordmark, not the hand emoji.
+    _native_reaction("ok", "OK", "OK", "/-ok", 68),
     _native_reaction("peace", "Chiến thắng", "✌️", "/-v", 69),
     _native_reaction("thanks", "Cảm ơn", "🙏", "/-thanks", 70),
     _native_reaction("punch", "Cú đấm", "👊", "/-punch", 71),

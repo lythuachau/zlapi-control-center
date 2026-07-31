@@ -194,15 +194,18 @@
     const body = { cookies };
     const imei = String(form.get("imei") || "").trim();
     if (imei) body.imei = imei;
+    const submit = event.currentTarget.querySelector('[type="submit"]');
+    if (submit) submit.disabled = true;
     try {
       const account = await api(`/api/v1/accounts/${form.get("account_id")}`, {
         method: "PATCH",
         body: JSON.stringify(body)
       });
-      toast(`Đã cập nhật phiên ${account.name}. Listener vẫn đang tắt.`);
+      toast(`Đã xác minh đúng tài khoản ${account.name}. Lịch sử được giữ nguyên và đang đồng bộ bù; listener vẫn tắt.`);
       setTimeout(() => location.reload(), 700);
     } catch (error) {
       toast(error.message, "error");
+      if (submit) submit.disabled = false;
     }
   });
 

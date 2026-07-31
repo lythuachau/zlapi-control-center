@@ -6,12 +6,14 @@
   if (!app || !control) return;
 
   const { api, toast } = control;
+  const chatText = window.ZChatText;
   const $ = (selector, root = document) => root.querySelector(selector);
   const $$ = (selector, root = document) => [...root.querySelectorAll(selector)];
   const MAX_QUICK_REACTIONS = 40;
   const MESSAGE_PAGE_SIZE = 180;
   const FIXED_LIST_VIRTUAL_THRESHOLD = 60;
   const FIXED_LIST_OVERSCAN = 8;
+  const SELECTED_ACCOUNT_STORAGE_KEY = "zlapi-chat-selected-account-id";
   const timeFormatter = new Intl.DateTimeFormat("vi-VN", {
     hour: "2-digit",
     minute: "2-digit",
@@ -24,6 +26,9 @@
     accountId: "",
     activeThread: null,
     conversations: [],
+    conversationsAccountId: "",
+    conversationCache: new Map(),
+    conversationRequestId: 0,
     nav: "messages",
     filter: "all",
     search: "",
@@ -95,6 +100,10 @@
     unreadReview: null,
     unreadViewportFrame: null,
     messageScrollFrame: null,
+    messageNavigation: null,
+    messageNavigationSequence: 0,
+    historyLoadBlockedUntil: 0,
+    scrollAnchorReleaseFrame: null,
     followLatest: false,
     bottomSettleTimers: [],
     lastExitReadKey: "",
@@ -198,6 +207,9 @@
   }
 
   const accountSelect = $("#chat-account");
+  const connectionBanner = $("#chat-connection-banner");
+  const connectionBannerCopy = $("#chat-connection-banner-copy");
+  const connectionBannerAction = $("#chat-connection-banner-action");
   const conversationList = $("#chat-conversations");
   const conversationSearch = $("#chat-search")?.closest(".zchat-search");
   const conversationFilters = $(".zchat-filters");
@@ -469,11 +481,37 @@
     return accountSelect?.selectedOptions?.[0] || null;
   }
 
+  function restoreSelectedAccount() {
+    if (!accountSelect) return;
+    try {
+      const savedAccountId = localStorage.getItem(SELECTED_ACCOUNT_STORAGE_KEY);
+      if (
+        savedAccountId
+        && [...accountSelect.options].some((option) => option.value === savedAccountId)
+      ) {
+        accountSelect.value = savedAccountId;
+      }
+    } catch {
+      // Browsers can deny localStorage in strict privacy modes. Selection still works
+      // for the current page, so no user-facing error is needed here.
+    }
+  }
+
+  function rememberSelectedAccount() {
+    if (!state.accountId) return;
+    try {
+      localStorage.setItem(SELECTED_ACCOUNT_STORAGE_KEY, state.accountId);
+    } catch {
+      // Keep account switching functional even when persistent storage is unavailable.
+    }
+  }
+
   function accountIsReady() {
     const option = selectedAccountOption();
     return Boolean(
       option &&
       option.value &&
+      option.dataset.enabled === "true" &&
       option.dataset.status === "online" &&
       option.dataset.listener === "true",
     );
@@ -483,15 +521,22 @@
     const option = selectedAccountOption();
     const name = option?.dataset.name || "Chưa chọn tài khoản";
     const status = option?.dataset.status || "missing";
+    const enabled = option?.dataset.enabled === "true";
     const listener = option?.dataset.listener === "true";
-    const ready = status === "online" && listener;
+    const hasAccount = Boolean(option?.value);
+    const ready = hasAccount && enabled && status === "online" && listener;
+    const sessionError = ["error", "identity_mismatch"].includes(status);
     const listenerState = $("#chat-listener-state");
 
     $("#chat-account-name").textContent = name;
     $("#chat-detail-account").textContent = name;
     $("#chat-account-status").textContent = ready
       ? "Listener đang kết nối"
-      : status === "error"
+      : !hasAccount
+        ? "Chưa có tài khoản Zalo"
+        : !enabled
+          ? "Tài khoản đã tắt · lịch sử chỉ đọc"
+          : sessionError
         ? "Phiên lỗi · chờ admin cập nhật"
         : listener
           ? `Listener ${status}`
@@ -501,20 +546,46 @@
     $("#chat-health-title").textContent = ready ? "Kết nối ổn định" : "Chưa thể gửi tin";
     $("#chat-health-copy").textContent = ready
       ? "Đang nhận sự kiện và có thể xếp hàng gửi."
-      : status === "error"
+      : !hasAccount
+        ? "Hãy thêm tài khoản trong Control Center để bắt đầu."
+        : !enabled
+          ? "Tài khoản đang ở chế độ chỉ đọc; lịch sử đã lưu vẫn có thể xem."
+          : sessionError
         ? "Admin cần cập nhật cookie/IMEI và bật lại Listener."
         : "Hãy kiểm tra trạng thái tài khoản trong Control Center.";
     $(".zchat-health-card")?.classList.toggle("online", ready);
-    $(".zchat-health-card")?.classList.toggle("error", status === "error");
+    $(".zchat-health-card")?.classList.toggle("error", hasAccount && !ready);
     listenerState?.classList.toggle("online", ready);
-    listenerState?.classList.toggle("error", status === "error");
+    listenerState?.classList.toggle("error", sessionError);
     if (listenerState) {
       listenerState.querySelector("span").textContent = ready
         ? "Listener online"
-        : status === "error"
+        : !hasAccount
+          ? "Chưa chọn tài khoản"
+          : !enabled
+            ? "Lịch sử chỉ đọc"
+            : sessionError
           ? "Phiên cần cập nhật"
           : "Listener chưa sẵn sàng";
     }
+    if (connectionBanner) {
+      connectionBanner.hidden = !hasAccount || ready;
+    }
+    if (connectionBannerCopy && connectionBannerAction && hasAccount && !ready) {
+      if (!enabled) {
+        connectionBannerCopy.textContent = "Tài khoản đã tắt — lịch sử vẫn an toàn và đang ở chế độ chỉ đọc";
+        connectionBannerAction.textContent = "Quản lý tài khoản";
+      } else if (status === "online" && !listener) {
+        connectionBannerCopy.textContent = "Phiên đã xác minh — hãy bật Listener để gửi và nhận tin realtime";
+        connectionBannerAction.textContent = "Bật Listener";
+      } else {
+        connectionBannerCopy.textContent = "Mất kết nối — lịch sử vẫn an toàn; cập nhật phiên để gửi tiếp";
+        connectionBannerAction.textContent = "Cập nhật phiên";
+      }
+    }
+    if (contactsRefresh) contactsRefresh.disabled = !ready;
+    app.classList.toggle("account-read-only", hasAccount && !ready);
+    renderRichPreview();
     updateComposer();
   }
 
@@ -536,7 +607,7 @@
     } else if (!state.activeThread) {
       draft.placeholder = "Chọn hội thoại để bắt đầu…";
     } else if (!accountIsReady()) {
-      draft.placeholder = "Listener phải online trước khi gửi…";
+      draft.placeholder = "Mất kết nối — lịch sử vẫn an toàn; cập nhật phiên để gửi tiếp";
     } else {
       draft.placeholder = `Nhắn tin cho ${state.activeThread.name}…`;
     }
@@ -769,7 +840,9 @@
     const item = state.richDraft;
     richPreviewMedia.replaceChildren();
     richPreviewCard.classList.toggle("empty", !item);
-    if (richSend) richSend.disabled = !item || state.richUploading;
+    if (richSend) {
+      richSend.disabled = !item || !accountIsReady() || state.richUploading;
+    }
     if (!item) {
       richPreviewMedia.textContent = "✦";
       richPreviewTitle.textContent = "Chưa chọn nội dung";
@@ -2045,6 +2118,23 @@
     renderAutomationStickerSelection();
   }
 
+  function automationCompatibleReactions(items) {
+    return Array.isArray(items)
+      ? items.filter(
+        (item) => item?.enabled !== false
+          && (item?.mode === "native" || item?.mode === "experimental"),
+      )
+      : [];
+  }
+
+  function syncAutomationReactionsFromCatalog(items) {
+    state.automationReactions = automationCompatibleReactions(items);
+    if (!state.automationReactions.some((item) => item.id === state.automationReactionId)) {
+      state.automationReactionId = state.automationReactions[0]?.id || "";
+    }
+    renderAutomationReactions();
+  }
+
   function renderAutomationReactions() {
     if (!automationReactions || !automationReactionStatus) return;
     if (!state.automationReactions.length) {
@@ -2067,9 +2157,12 @@
       button.className = `zchat-automation-reaction${
         item.id === state.automationReactionId ? " selected" : ""
       }`;
+      if (item.glyph === "OK") button.classList.add("zchat-reaction-wordmark");
       button.disabled = !state.canManageAutomations;
       button.textContent = item.glyph;
-      button.title = `${item.label} · Reaction Zalo đã xác nhận`;
+      button.title = `${item.label} · ${
+        item.mode === "experimental" ? "Reaction Zalo thử nghiệm" : "Reaction Zalo"
+      }`;
       button.setAttribute("aria-label", `Chọn reaction ${item.label}`);
       button.setAttribute(
         "aria-pressed",
@@ -2083,7 +2176,9 @@
     });
     automationReactions.replaceChildren(...nodes);
     automationReactionStatus.textContent = selected
-      ? `${selected.glyph} ${selected.label}`
+      ? `${selected.glyph} ${selected.label}${
+        selected.mode === "experimental" ? " · Thử nghiệm" : ""
+      }`
       : "Chưa chọn";
   }
 
@@ -2107,7 +2202,7 @@
     state.automationRule = rule;
     state.automationGroups = Array.isArray(result?.groups) ? result.groups : [];
     state.automationReactions = Array.isArray(result?.reactions)
-      ? result.reactions.filter((item) => item?.mode === "native" && item?.verified)
+      ? automationCompatibleReactions(result.reactions)
       : [];
     state.automationSelectedGroups = new Set(
       (Array.isArray(rule.group_ids) ? rule.group_ids : [])
@@ -2576,15 +2671,23 @@
 
   async function loadConversations({ preserveSelection = true } = {}) {
     if (!state.accountId) {
+      state.conversationRequestId += 1;
       state.conversations = [];
+      state.conversationsAccountId = "";
       renderConversations();
       return;
     }
+    const accountId = state.accountId;
+    const requestId = ++state.conversationRequestId;
     conversationList.setAttribute("aria-busy", "true");
     try {
-      state.conversations = await api(
-        `/api/v1/chat/conversations?account_id=${encodeURIComponent(state.accountId)}&limit=150`,
+      const conversations = await api(
+        `/api/v1/chat/conversations?account_id=${encodeURIComponent(accountId)}&limit=150`,
       );
+      if (requestId !== state.conversationRequestId || state.accountId !== accountId) return;
+      state.conversations = Array.isArray(conversations) ? conversations : [];
+      state.conversationsAccountId = accountId;
+      state.conversationCache.set(accountId, state.conversations);
       void syncMissingProfiles(state.conversations);
       if (state.activeThread) {
         const refreshed = state.conversations.find(
@@ -2620,11 +2723,22 @@
         clearActiveThread();
       }
     } catch (error) {
-      toast(error.message, "error");
-      state.conversations = [];
+      if (requestId !== state.conversationRequestId || state.accountId !== accountId) return;
+      if (state.conversationsAccountId !== accountId) {
+        state.conversations = state.conversationCache.get(accountId) || [];
+        state.conversationsAccountId = accountId;
+      }
       renderConversations();
+      toast(
+        state.conversations.length
+          ? `Không thể làm mới hội thoại: ${error.message}. Đang hiển thị dữ liệu đã tải.`
+          : `Không thể tải hội thoại: ${error.message}. Lịch sử trên máy chủ không bị xóa.`,
+        "error",
+      );
     } finally {
-      conversationList.removeAttribute("aria-busy");
+      if (requestId === state.conversationRequestId) {
+        conversationList.removeAttribute("aria-busy");
+      }
     }
   }
 
@@ -2701,7 +2815,11 @@
     if (!captionText) return;
     const caption = document.createElement("span");
     caption.className = "zchat-media-caption";
-    caption.textContent = captionText;
+    if (chatText?.appendLinkedText) {
+      chatText.appendLinkedText(caption, captionText);
+    } else {
+      caption.textContent = captionText;
+    }
     container.append(caption);
   }
 
@@ -3000,7 +3118,12 @@
       addInfoCard(bubble, message, message.kind);
       return;
     }
-    bubble.textContent = message.text;
+    bubble.classList.add("has-text");
+    if (chatText?.appendLinkedText) {
+      chatText.appendLinkedText(bubble, message.text);
+    } else {
+      bubble.textContent = message.text;
+    }
   }
 
   function renderQuotedMessage(bubble, message) {
@@ -3030,7 +3153,9 @@
       button.className = reaction.mine ? "mine" : "";
       button.title = `${reaction.label || "Reaction"} · ${reaction.count || 1}`;
       button.dataset.reactionId = reaction.reaction_id;
+      button.disabled = !accountIsReady();
       const glyph = document.createElement("span");
+      if (reaction.reaction_id === "ok") glyph.className = "zchat-reaction-wordmark";
       glyph.textContent = reaction.glyph || "✨";
       const count = document.createElement("b");
       count.textContent = String(reaction.count || 1);
@@ -3068,7 +3193,7 @@
   function renderMessageActions(message) {
     const actions = document.createElement("div");
     actions.className = "zchat-message-actions";
-    const unavailable = !message.event_id || message.undone;
+    const unavailable = !message.event_id || message.undone || !accountIsReady();
     actions.append(
       messageActionButton("Thả reaction", "☺", "reaction", message, unavailable),
       messageActionButton("Trả lời", "↩", "reply", message, unavailable),
@@ -3145,6 +3270,126 @@
     state.bottomSettleTimers = [];
   }
 
+  function suppressNativeMessageAnchoring() {
+    if (state.scrollAnchorReleaseFrame !== null) {
+      window.cancelAnimationFrame(state.scrollAnchorReleaseFrame);
+      state.scrollAnchorReleaseFrame = null;
+    }
+    messagesNode.classList.add("is-positioning");
+  }
+
+  function releaseNativeMessageAnchoring() {
+    if (state.scrollAnchorReleaseFrame !== null) {
+      window.cancelAnimationFrame(state.scrollAnchorReleaseFrame);
+    }
+    state.scrollAnchorReleaseFrame = window.requestAnimationFrame(() => {
+      state.scrollAnchorReleaseFrame = null;
+      if (!messageNavigationActive()) {
+        messagesNode.classList.remove("is-positioning");
+      }
+    });
+  }
+
+  function messageNavigationActive() {
+    return Boolean(
+      state.messageNavigation
+      && state.messageNavigation.threadId === state.activeThread?.thread_id,
+    );
+  }
+
+  function cancelMessageNavigation() {
+    const navigation = state.messageNavigation;
+    if (navigation?.frameId != null) {
+      window.cancelAnimationFrame(navigation.frameId);
+    }
+    if (navigation?.settleTimer != null) {
+      window.clearTimeout(navigation.settleTimer);
+    }
+    state.messageNavigation = null;
+    state.historyLoadBlockedUntil = 0;
+    releaseNativeMessageAnchoring();
+  }
+
+  function beginMessageNavigation(eventId) {
+    cancelMessageNavigation();
+    stopFollowingLatest();
+    suppressNativeMessageAnchoring();
+    const navigation = {
+      id: ++state.messageNavigationSequence,
+      threadId: state.activeThread?.thread_id || "",
+      eventId: String(eventId || ""),
+      frameId: null,
+      settleTimer: null,
+    };
+    state.messageNavigation = navigation;
+    return navigation;
+  }
+
+  function matchingMessageNavigation(eventId) {
+    const navigation = state.messageNavigation;
+    if (
+      navigation
+      && navigation.threadId === state.activeThread?.thread_id
+      && navigation.eventId === String(eventId || "")
+    ) {
+      return navigation;
+    }
+    return null;
+  }
+
+  function messageEventTarget(eventId) {
+    return messagesNode.querySelector(
+      `[data-event-id="${CSS.escape(String(eventId || ""))}"]`,
+    );
+  }
+
+  function navigateToMessageEvent(
+    eventId,
+    { behavior = "smooth", block = "start" } = {},
+  ) {
+    let navigation = matchingMessageNavigation(eventId);
+    if (!navigation) navigation = beginMessageNavigation(eventId);
+    if (navigation.frameId !== null) {
+      window.cancelAnimationFrame(navigation.frameId);
+    }
+    if (navigation.settleTimer !== null) {
+      window.clearTimeout(navigation.settleTimer);
+    }
+    const navigationId = navigation.id;
+    navigation.frameId = window.requestAnimationFrame(() => {
+      const current = state.messageNavigation;
+      if (!current || current.id !== navigationId) return;
+      current.frameId = null;
+      const target = messageEventTarget(eventId);
+      if (!target) {
+        cancelMessageNavigation();
+        return;
+      }
+      target.scrollIntoView({ behavior, block });
+      state.lastMessageScrollTop = messagesNode.scrollTop;
+      current.settleTimer = window.setTimeout(() => {
+        const pending = state.messageNavigation;
+        if (!pending || pending.id !== navigationId) return;
+        pending.settleTimer = null;
+        const settledTarget = messageEventTarget(eventId);
+        if (!settledTarget) {
+          cancelMessageNavigation();
+          return;
+        }
+        // Media and content-visibility can alter row heights after the first
+        // scroll. One final non-animated alignment makes the target stable.
+        settledTarget.scrollIntoView({ behavior: "auto", block });
+        state.lastMessageScrollTop = messagesNode.scrollTop;
+        state.messageNavigation = null;
+        state.historyLoadBlockedUntil = Date.now() + 180;
+        state.followLatest = false;
+        releaseNativeMessageAnchoring();
+        updateLatestJump();
+      }, behavior === "smooth" ? 560 : 120);
+    });
+    return true;
+  }
+
   function settleMessagesAtBottom() {
     if (!state.followLatest) return;
     messagesNode.scrollTop = messagesNode.scrollHeight;
@@ -3180,6 +3425,7 @@
   }
 
   function restoreScrollAnchor(anchor) {
+    suppressNativeMessageAnchoring();
     const row = anchor?.messageId
       ? messagesNode.querySelector(
         `[data-message-id="${CSS.escape(anchor.messageId)}"]`,
@@ -3190,6 +3436,8 @@
         top: Math.min(anchor?.scrollTop || 0, messagesNode.scrollHeight),
         behavior: "auto",
       });
+      state.lastMessageScrollTop = messagesNode.scrollTop;
+      releaseNativeMessageAnchoring();
       return;
     }
     const containerTop = messagesNode.getBoundingClientRect().top;
@@ -3198,9 +3446,12 @@
       top: messagesNode.scrollTop + offsetNow - anchor.offset,
       behavior: "auto",
     });
+    state.lastMessageScrollTop = messagesNode.scrollTop;
+    releaseNativeMessageAnchoring();
   }
 
   function scrollMessages({ behavior = "smooth" } = {}) {
+    cancelMessageNavigation();
     state.followLatest = true;
     if (behavior === "auto") {
       messagesNode.scrollTop = messagesNode.scrollHeight;
@@ -3282,10 +3533,12 @@
       state.messageScrollFrame = null;
       const currentScrollTop = messagesNode.scrollTop;
       const scrollingUp = currentScrollTop < state.lastMessageScrollTop - 1;
+      const navigating = messageNavigationActive()
+        || Date.now() < state.historyLoadBlockedUntil;
       state.lastMessageScrollTop = currentScrollTop;
-      if (isNearMessagesBottom()) state.followLatest = true;
-      if (scrollingUp) scheduleUnreadViewportCheck();
-      if (currentScrollTop <= 90) void loadOlderMessages();
+      if (!navigating && isNearMessagesBottom()) state.followLatest = true;
+      if (scrollingUp && !navigating) scheduleUnreadViewportCheck();
+      if (currentScrollTop <= 90 && !navigating) void loadOlderMessages();
       updateLatestJump();
     });
   }
@@ -3318,6 +3571,7 @@
   ) {
     state.messages = messages;
     if (!messages.length) {
+      if (mode === "unread") cancelMessageNavigation();
       stopFollowingLatest();
       const empty = document.createElement("div");
       empty.className = "zchat-empty";
@@ -3345,6 +3599,10 @@
       }
       nodes.push(renderMessage(message));
     }
+    if (mode === "preserve") suppressNativeMessageAnchoring();
+    if (mode === "unread" && !matchingMessageNavigation(firstUnreadEventId)) {
+      beginMessageNavigation(firstUnreadEventId);
+    }
     cleanupDeferredMedia(messagesNode);
     messagesNode.replaceChildren(...nodes);
 
@@ -3352,13 +3610,9 @@
       stopFollowingLatest();
       restoreScrollAnchor(anchor);
     } else if (mode === "unread") {
-      stopFollowingLatest();
-      const target = messagesNode.querySelector(
-        `[data-event-id="${CSS.escape(String(firstUnreadEventId))}"]`,
-      );
-      requestAnimationFrame(() => {
-        target?.scrollIntoView({ behavior: "smooth", block: "start" });
-        updateLatestJump();
+      navigateToMessageEvent(firstUnreadEventId, {
+        behavior: "auto",
+        block: "start",
       });
     } else if (mode === "target") {
       const target = messagesNode.querySelector(
@@ -3380,7 +3634,9 @@
     updateLatestJump();
   }
 
-  async function loadMessages({ mode = "latest", aroundEventId = null } = {}) {
+  async function loadMessages(
+    { mode = "latest", aroundEventId = null, navigationId = null } = {},
+  ) {
     if (!state.accountId || !state.activeThread) return;
     const requestId = ++state.messageRequestId;
     const threadId = state.activeThread.thread_id;
@@ -3396,6 +3652,13 @@
       if (
         requestId !== state.messageRequestId ||
         state.activeThread?.thread_id !== threadId
+      ) {
+        return;
+      }
+      if (
+        mode === "unread"
+        && navigationId !== null
+        && state.messageNavigation?.id !== navigationId
       ) {
         return;
       }
@@ -3422,6 +3685,12 @@
       });
       void syncMissingMessageProfiles(messages);
     } catch (error) {
+      if (
+        mode === "unread"
+        && (navigationId === null || state.messageNavigation?.id === navigationId)
+      ) {
+        cancelMessageNavigation();
+      }
       toast(error.message, "error");
     } finally {
       messagesNode.removeAttribute("aria-busy");
@@ -3434,13 +3703,14 @@
       !state.activeThread ||
       !state.messagePagination.hasOlder ||
       state.messagePagination.loading ||
-      !state.messagePagination.nextCursor
+      !state.messagePagination.nextCursor ||
+      messageNavigationActive() ||
+      Date.now() < state.historyLoadBlockedUntil
     ) {
       return;
     }
     const requestId = state.messageRequestId;
     const threadId = state.activeThread.thread_id;
-    const anchor = captureScrollAnchor();
     const cursor = state.messagePagination.nextCursor;
     state.messagePagination.loading = true;
     try {
@@ -3455,6 +3725,16 @@
       ) {
         return;
       }
+      if (
+        messageNavigationActive()
+        || Date.now() < state.historyLoadBlockedUntil
+      ) {
+        state.messagePagination.loading = false;
+        return;
+      }
+      // Capture at response time. The reader may have moved while the API was
+      // pending, and a request-time anchor must not overwrite that newer intent.
+      const anchor = captureScrollAnchor();
       const existing = new Set(state.messages.map((message) => String(message.id)));
       const uniqueOlder = older.filter((message) => !existing.has(String(message.id)));
       const merged = [...uniqueOlder, ...state.messages].sort(
@@ -4090,11 +4370,11 @@
     const job = result?.job;
     const syncing = job?.status === "queued" || job?.status === "running";
     if (groupMembersSync) {
-      groupMembersSync.disabled = !state.canSend || syncing;
+      groupMembersSync.disabled = !state.canSend || !accountIsReady() || syncing;
       groupMembersSync.textContent = syncing ? "Đang đồng bộ…" : "Đồng bộ";
-      groupMembersSync.title = state.canSend
+      groupMembersSync.title = state.canSend && accountIsReady()
         ? "Lấy lại thông tin và danh sách thành viên từ Zalo"
-        : "Tài khoản hiện tại chỉ có quyền xem";
+        : "Tài khoản và Listener phải online";
     }
     if (groupManageOpen) {
       groupManageOpen.disabled = !state.canManageGroups || !accountIsReady() || syncing;
@@ -4682,7 +4962,7 @@
     };
     $$('[data-friend-action]').forEach((button) => {
       button.hidden = !visibility[button.dataset.friendAction];
-      button.disabled = Boolean(pending);
+      button.disabled = Boolean(pending) || !accountIsReady();
     });
     if (friendRequestMessageRow) {
       friendRequestMessageRow.hidden = !visibility.send_request;
@@ -4741,7 +5021,12 @@
 
   async function submitFriendAction(action, confirmation = null, confirmed = false) {
     const item = state.activeThread;
-    if (!item || item.thread_type !== "user" || !state.accountId) return;
+    if (
+      !item
+      || item.thread_type !== "user"
+      || !state.accountId
+      || !accountIsReady()
+    ) return;
     try {
       const result = await api(
         `/api/v1/chat/friends/${encodeURIComponent(item.thread_id)}/actions`,
@@ -4776,7 +5061,8 @@
     if (!friendDangerSubmit) return;
     const expected = state.activeThread?.name || "";
     const valid = text(friendDangerConfirmation?.value) === expected
-      && Boolean(friendDangerCheck?.checked);
+      && Boolean(friendDangerCheck?.checked)
+      && accountIsReady();
     friendDangerSubmit.disabled = !valid;
     if (friendDangerStatus) {
       friendDangerStatus.textContent = valid
@@ -4848,6 +5134,7 @@
 
   function clearActiveThread() {
     state.messageRequestId += 1;
+    cancelMessageNavigation();
     if (state.unreadViewportFrame !== null) {
       window.cancelAnimationFrame(state.unreadViewportFrame);
       state.unreadViewportFrame = null;
@@ -4936,6 +5223,7 @@
       scrollMessages({ behavior: "auto" });
       return;
     }
+    cancelMessageNavigation();
     const previous = state.activeThread;
     const previousAccountId = state.accountId;
     clearAttachments();
@@ -5036,8 +5324,9 @@
 
   function mergeIncrementalMessages(messages) {
     if (!Array.isArray(messages) || !messages.length) return 0;
-    const wasFollowing = state.followLatest || isNearMessagesBottom();
-    const anchor = wasFollowing ? null : captureScrollAnchor();
+    const navigation = messageNavigationActive() ? state.messageNavigation : null;
+    const wasFollowing = !navigation && (state.followLatest || isNearMessagesBottom());
+    const anchor = !navigation && !wasFollowing ? captureScrollAnchor() : null;
     const additions = [];
     let changes = 0;
 
@@ -5072,7 +5361,12 @@
     if (empty) messagesNode.replaceChildren();
     for (const message of additions) insertRenderedMessage(message);
     void syncMissingMessageProfiles(messages);
-    if (wasFollowing) scrollMessages({ behavior: "auto" });
+    if (navigation) {
+      navigateToMessageEvent(navigation.eventId, {
+        behavior: "auto",
+        block: "start",
+      });
+    } else if (wasFollowing) scrollMessages({ behavior: "auto" });
     else if (anchor) restoreScrollAnchor(anchor);
     updateUnreadJump();
     updateLatestJump();
@@ -5122,7 +5416,6 @@
   function appendRealtimeMessage(message) {
     if (!state.activeThread || message.thread_id !== state.activeThread.thread_id) return;
     mergeIncrementalMessages([message]);
-    scrollMessages({ behavior: "auto" });
   }
 
   function scheduleConversationReload() {
@@ -5159,6 +5452,9 @@
       void markConversationRead(previous, previousAccountId);
     }
     state.accountId = accountSelect?.value || "";
+    rememberSelectedAccount();
+    state.conversations = state.conversationCache.get(state.accountId) || [];
+    state.conversationsAccountId = state.accountId;
     window.clearTimeout(state.messageIncrementalTimer);
     state.messageIncrementalQueuedThread = "";
     window.clearTimeout(state.contactsPollTimer);
@@ -5189,6 +5485,7 @@
     state.activeThread = null;
     updateAccountStatus();
     clearActiveThread();
+    renderConversations();
     setNavigation(currentNavigation);
     await loadConversations({ preserveSelection: false });
   }
@@ -5218,6 +5515,7 @@
   async function loadReactionCatalog() {
     try {
       state.reactionCatalog = await api("/api/v1/chat/reactions/catalog");
+      syncAutomationReactionsFromCatalog(state.reactionCatalog);
       renderReactionManager();
     } catch (error) {
       toast(`Không thể tải thư viện reaction: ${error.message}`, "error");
@@ -5231,6 +5529,7 @@
     button.title = `${item.label}${item.mode === "local" ? " · Chỉ ZChat" : ""}`;
     button.dataset.reactionId = item.id;
     const glyph = document.createElement("span");
+    if (item.id === "ok") glyph.className = "zchat-reaction-wordmark";
     glyph.textContent = item.glyph;
     button.append(glyph);
     if (!compact) {
@@ -5360,7 +5659,7 @@
   }
 
   function beginReply(message) {
-    if (!message?.event_id || message.undone) return;
+    if (!message?.event_id || message.undone || !accountIsReady()) return;
     state.replyTarget = message;
     updateReplyPreview();
     draft.focus();
@@ -5470,7 +5769,7 @@
   }
 
   function openForwardDialog(message) {
-    if (!message?.event_id || message.undone) return;
+    if (!message?.event_id || message.undone || !accountIsReady()) return;
     state.forwardTarget = message;
     state.forwardSelection.clear();
     $("#chat-forward-search").value = "";
@@ -5481,7 +5780,7 @@
   }
 
   async function submitForward() {
-    if (!state.forwardTarget || !state.forwardSelection.size) return;
+    if (!state.forwardTarget || !state.forwardSelection.size || !accountIsReady()) return;
     const button = $("#chat-forward-submit");
     button.disabled = true;
     try {
@@ -5513,7 +5812,12 @@
     const download = $("[data-message-menu-action='download']", messageMenu);
     const undo = $("[data-message-menu-action='undo']", messageMenu);
     download.hidden = !message.media?.url;
-    undo.hidden = !(message.mine && message.event_id && !message.undone);
+    undo.hidden = !(
+      message.mine
+      && message.event_id
+      && !message.undone
+      && accountIsReady()
+    );
     positionFloating(messageMenu, anchor);
   }
 
@@ -5551,7 +5855,7 @@
   }
 
   async function undoMessage(message) {
-    if (!message?.mine || !message.event_id || message.undone) return;
+    if (!message?.mine || !message.event_id || message.undone || !accountIsReady()) return;
     if (!window.confirm("Thu hồi tin nhắn này trên Zalo? Thao tác không thể hoàn tác.")) return;
     try {
       await api("/api/v1/chat/undo", {
@@ -5579,6 +5883,7 @@
       row.className = "zchat-catalog-item";
       const glyph = document.createElement("span");
       glyph.className = "glyph";
+      if (item.id === "ok") glyph.classList.add("zchat-reaction-wordmark");
       glyph.textContent = item.glyph;
       const copy = document.createElement("span");
       const name = document.createElement("strong");
@@ -5697,6 +6002,7 @@
         body: JSON.stringify({ items: state.reactionManagerDraft }),
       });
       state.reactionCatalog = items;
+      syncAutomationReactionsFromCatalog(items);
       state.reactionManagerDraft = items.map((item) => ({ ...item }));
       renderReactionManager();
       $("#chat-reaction-manager-status").textContent = "Đã lưu thư viện reaction.";
@@ -6298,18 +6604,24 @@
     stopFollowingLatest();
     updateUnreadJump();
     void markConversationRead(state.activeThread);
-    const target = messagesNode.querySelector(
-      `[data-event-id="${CSS.escape(String(review.firstEventId))}"]`,
-    );
+    const navigation = beginMessageNavigation(review.firstEventId);
+    const target = messageEventTarget(review.firstEventId);
     if (target) {
-      target.scrollIntoView({ behavior: "smooth", block: "start" });
+      navigateToMessageEvent(review.firstEventId, {
+        behavior: "smooth",
+        block: "start",
+      });
       return;
     }
     await loadMessages({
       mode: "unread",
       aroundEventId: review.firstEventId,
+      navigationId: navigation.id,
     });
   });
+  messagesNode?.addEventListener("wheel", cancelMessageNavigation, { passive: true });
+  messagesNode?.addEventListener("touchstart", cancelMessageNavigation, { passive: true });
+  messagesNode?.addEventListener("pointerdown", cancelMessageNavigation, { passive: true });
   for (const reactionList of [reactionQuick, reactionAll]) {
     reactionList?.addEventListener("click", (event) => {
       const button = event.target.closest("[data-reaction-id]");
@@ -6533,8 +6845,9 @@
   });
   composer?.addEventListener("submit", sendMessage);
 
+  restoreSelectedAccount();
   updateAccountStatus();
   loadReactionCatalog();
-  changeAccount();
+  void changeAccount();
   connectEvents();
 })();

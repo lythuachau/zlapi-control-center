@@ -69,15 +69,23 @@ class State(object):
 			}
 			try:
 				url = f"https://wpa.chat.zalo.me/api/login/getLoginInfo?imei={imei}&type=30&client_version=645&computer_name=Web&ts={_util.now()}"
-				response = requests.get(url, headers=headers, cookies=cls._cookies)
+				response = requests.get(
+					url,
+					headers=headers,
+					cookies=cls._cookies,
+					timeout=30,
+				)
+				response.raise_for_status()
 				data = response.json()
-				zpw = data["data"]["zpw_ws"]
-				uid = data["data"]["uid"]
-				phone = data["data"]["phone_number"]
-				key = data["data"]["zpw_enk"]
+				login_data = data["data"]
+				zpw = login_data["zpw_ws"]
+				uid = login_data["uid"]
+				phone = login_data["phone_number"]
+				key = login_data["zpw_enk"]
 				
 				content = {
 					"data": {
+						**login_data,
 						"phone_number": str(phone),
 						"secret_key": str(key),
 						"send2me_id": str(uid),
