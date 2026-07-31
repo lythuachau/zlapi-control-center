@@ -64,16 +64,20 @@ if ($LASTEXITCODE -ne 0) { throw "zlapi-worker dependency configuration failed."
 if ($LASTEXITCODE -ne 0) { throw "zlapi-listener dependency configuration failed." }
 
 $serviceGrants = @($serviceIds | ForEach-Object { "NT SERVICE\${_}:(OI)(CI)RX" })
-& icacls.exe $ServiceRoot /inheritance:r /grant:r '*S-1-5-32-544:(OI)(CI)F' '*S-1-5-18:(OI)(CI)F' $serviceGrants /T /C | Out-Null
+& icacls.exe $ServiceRoot /inheritance:r /grant:r '*S-1-5-32-544:(OI)(CI)F' '*S-1-5-18:(OI)(CI)F' $serviceGrants | Out-Null
+& icacls.exe (Join-Path $ServiceRoot '*') /reset /T /C | Out-Null
 & icacls.exe $DataRoot /inheritance:r /grant:r '*S-1-5-32-544:(OI)(CI)F' '*S-1-5-18:(OI)(CI)F' $serviceGrants | Out-Null
 
 $allModify = @($serviceIds | ForEach-Object { "NT SERVICE\${_}:(OI)(CI)M" })
-& icacls.exe $logs /inheritance:r /grant:r '*S-1-5-32-544:(OI)(CI)F' '*S-1-5-18:(OI)(CI)F' $allModify /T /C | Out-Null
-& icacls.exe $uploads /inheritance:r /grant:r '*S-1-5-32-544:(OI)(CI)F' '*S-1-5-18:(OI)(CI)F' 'NT SERVICE\zlapi-web:(OI)(CI)M' 'NT SERVICE\zlapi-worker:(OI)(CI)M' 'NT SERVICE\zlapi-listener:(OI)(CI)RX' /T /C | Out-Null
-& icacls.exe $media /inheritance:r /grant:r '*S-1-5-32-544:(OI)(CI)F' '*S-1-5-18:(OI)(CI)F' 'NT SERVICE\zlapi-web:(OI)(CI)M' 'NT SERVICE\zlapi-worker:(OI)(CI)M' 'NT SERVICE\zlapi-listener:(OI)(CI)RX' /T /C | Out-Null
-& icacls.exe $run /inheritance:r /grant:r '*S-1-5-32-544:(OI)(CI)F' '*S-1-5-18:(OI)(CI)F' 'NT SERVICE\zlapi-web:(OI)(CI)RX' 'NT SERVICE\zlapi-worker:(OI)(CI)M' 'NT SERVICE\zlapi-listener:(OI)(CI)M' /T /C | Out-Null
-& icacls.exe $archive /inheritance:r /grant:r '*S-1-5-32-544:(OI)(CI)F' '*S-1-5-18:(OI)(CI)F' 'NT SERVICE\zlapi-web:(OI)(CI)R' /T /C | Out-Null
-& icacls.exe $backups /inheritance:r /grant:r '*S-1-5-32-544:(OI)(CI)F' '*S-1-5-18:(OI)(CI)F' /T /C | Out-Null
+& icacls.exe $logs /inheritance:r /grant:r '*S-1-5-32-544:(OI)(CI)F' '*S-1-5-18:(OI)(CI)F' $allModify | Out-Null
+& icacls.exe $uploads /inheritance:r /grant:r '*S-1-5-32-544:(OI)(CI)F' '*S-1-5-18:(OI)(CI)F' 'NT SERVICE\zlapi-web:(OI)(CI)M' 'NT SERVICE\zlapi-worker:(OI)(CI)M' 'NT SERVICE\zlapi-listener:(OI)(CI)RX' | Out-Null
+& icacls.exe $media /inheritance:r /grant:r '*S-1-5-32-544:(OI)(CI)F' '*S-1-5-18:(OI)(CI)F' 'NT SERVICE\zlapi-web:(OI)(CI)M' 'NT SERVICE\zlapi-worker:(OI)(CI)M' 'NT SERVICE\zlapi-listener:(OI)(CI)RX' | Out-Null
+& icacls.exe $run /inheritance:r /grant:r '*S-1-5-32-544:(OI)(CI)F' '*S-1-5-18:(OI)(CI)F' 'NT SERVICE\zlapi-web:(OI)(CI)RX' 'NT SERVICE\zlapi-worker:(OI)(CI)M' 'NT SERVICE\zlapi-listener:(OI)(CI)M' | Out-Null
+& icacls.exe $archive /inheritance:r /grant:r '*S-1-5-32-544:(OI)(CI)F' '*S-1-5-18:(OI)(CI)F' 'NT SERVICE\zlapi-web:(OI)(CI)R' | Out-Null
+& icacls.exe $backups /inheritance:r /grant:r '*S-1-5-32-544:(OI)(CI)F' '*S-1-5-18:(OI)(CI)F' | Out-Null
+foreach ($path in @($logs, $uploads, $media, $run, $archive, $backups)) {
+    & icacls.exe (Join-Path $path '*') /reset /T /C | Out-Null
+}
 & icacls.exe $secrets /inheritance:r /grant:r '*S-1-5-32-544:(OI)(CI)F' '*S-1-5-18:(OI)(CI)F' $serviceGrants | Out-Null
 foreach ($path in @($environmentFile, $keyFile)) {
     $readGrants = @($serviceIds | ForEach-Object { "NT SERVICE\${_}:R" })
