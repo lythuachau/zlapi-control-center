@@ -2939,13 +2939,41 @@
     addMediaCaption(container, message);
   }
 
+  function messageDownloadUrl(message) {
+    if (
+      message?.kind === "file"
+      && !message.mine
+      && Number(message.event_id) > 0
+      && state.accountId
+    ) {
+      const query = new URLSearchParams({ account_id: state.accountId });
+      return `/api/v1/chat/events/${encodeURIComponent(message.event_id)}/download?${query}`;
+    }
+    return text(message?.media?.url);
+  }
+
+  function triggerMessageDownload(message) {
+    const url = messageDownloadUrl(message);
+    if (!url) return;
+    const link = document.createElement("a");
+    link.href = url;
+    link.rel = "noopener noreferrer";
+    if (message?.kind === "file") link.download = text(message.media?.filename);
+    if (!url.startsWith("/")) link.target = "_blank";
+    document.body.append(link);
+    link.click();
+    link.remove();
+  }
+
   function addFileCard(container, message) {
     const media = message.media || {};
-    const card = media.url ? document.createElement("a") : document.createElement("span");
+    const downloadUrl = messageDownloadUrl(message);
+    const card = downloadUrl ? document.createElement("a") : document.createElement("span");
     card.className = "zchat-file-card";
-    if (media.url) {
-      card.href = media.url;
-      card.target = "_blank";
+    if (downloadUrl) {
+      card.href = downloadUrl;
+      card.download = text(media.filename);
+      if (!downloadUrl.startsWith("/")) card.target = "_blank";
       card.rel = "noopener noreferrer";
     }
     const filename = text(media.filename) || "Tệp đính kèm";
@@ -2962,10 +2990,10 @@
     const detail = document.createElement("small");
     detail.textContent = [text(media.mime_type), formatBytes(media.size)]
       .filter(Boolean)
-      .join(" · ") || (media.url ? "Mở hoặc tải tệp" : "Chưa có liên kết tải");
+      .join(" · ") || (downloadUrl ? "Tải tệp" : "Chưa có liên kết tải");
     const download = document.createElement("span");
     download.className = "zchat-file-download";
-    download.textContent = media.url ? "↓" : "—";
+    download.textContent = downloadUrl ? "↓" : "—";
     copy.append(name, detail);
     card.append(icon, copy, download);
     container.append(card);
@@ -5811,7 +5839,7 @@
     reactionPicker.hidden = true;
     const download = $("[data-message-menu-action='download']", messageMenu);
     const undo = $("[data-message-menu-action='undo']", messageMenu);
-    download.hidden = !message.media?.url;
+    download.hidden = !messageDownloadUrl(message);
     undo.hidden = !(
       message.mine
       && message.event_id
@@ -6658,9 +6686,7 @@
     const action = button.dataset.messageMenuAction;
     hideFloatingMenus();
     if (action === "copy") void copyMessage(message);
-    if (action === "download" && message.media?.url) {
-      window.open(message.media.url, "_blank", "noopener,noreferrer");
-    }
+    if (action === "download") triggerMessageDownload(message);
     if (action === "details") openMessageDetails(message);
     if (action === "undo") void undoMessage(message);
   });

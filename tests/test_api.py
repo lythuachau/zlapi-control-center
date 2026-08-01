@@ -2204,6 +2204,100 @@ def test_admin_configures_group_mention_sticker_automation(client: TestClient):
     assert forbidden.status_code == 403
 
 
+def test_received_chat_file_download_is_authorized_audited_and_streamed(
+    client: TestClient,
+    monkeypatch,
+):
+    assert (
+        client.get(
+            "/api/v1/chat/events/1/download",
+            params={"account_id": "missing"},
+        ).status_code
+        == 401
+    )
+    csrf = login(client)
+    account_id = client.post(
+        "/api/v1/accounts",
+        headers={"X-CSRF-Token": csrf},
+        json={
+            "name": "File receiver",
+            "imei": "imei-file-receiver-12345",
+            "cookies": {"zpw_sek": "file-receiver-secret"},
+        },
+    ).json()["id"]
+    with client.app.state.database.session_factory() as session:
+        event = Event(
+            account_id=account_id,
+            event_type="message.received",
+            thread_id="file-thread",
+            payload={
+                "message_id": "received-file-message",
+                "message": {
+                    "title": "báo-cáo.txt",
+                    "href": "https://f41-zfcloud.zdn.vn/file-token",
+                    "params": '{"fileSize": 4, "fileExt": "txt"}',
+                },
+                "message_object": {"msgType": "share.file"},
+                "thread_type": "USER",
+            },
+        )
+        session.add(event)
+        session.commit()
+        event_id = event.id
+
+    captured = {}
+
+    def fake_open(url, **kwargs):
+        captured.update({"url": url, **kwargs})
+        return SimpleNamespace(
+            status_code=206,
+            headers={
+                "Content-Type": "application/octet-stream",
+                "Content-Length": "4",
+                "Content-Range": "bytes 0-3/4",
+                "Content-Disposition": (
+                    "attachment; filename=\"bao-cao.txt\"; "
+                    "filename*=UTF-8''b%C3%A1o-c%C3%A1o.txt"
+                ),
+            },
+            chunks=lambda: iter((b"data",)),
+        )
+
+    monkeypatch.setattr("control_center.api.open_inbound_file", fake_open)
+    response = client.get(
+        f"/api/v1/chat/events/{event_id}/download",
+        params={"account_id": account_id},
+        headers={"Range": "bytes=0-3"},
+    )
+    assert response.status_code == 206
+    assert response.content == b"data"
+    assert response.headers["content-range"] == "bytes 0-3/4"
+    assert response.headers["content-disposition"].startswith("attachment;")
+    assert captured["url"] == "https://f41-zfcloud.zdn.vn/file-token"
+    assert captured["filename"] == "báo-cáo.txt"
+    assert captured["range_header"] == "bytes=0-3"
+    assert captured["max_bytes"] == 250 * 1024 * 1024
+    assert (
+        client.get(
+            f"/api/v1/chat/events/{event_id}/download",
+            params={"account_id": "wrong-account"},
+        ).status_code
+        == 404
+    )
+    with client.app.state.database.session_factory() as session:
+        audit = session.scalar(
+            select(AuditLog)
+            .where(
+                AuditLog.action == "chat.file.download",
+                AuditLog.resource_id == str(event_id),
+            )
+            .order_by(AuditLog.id.desc())
+        )
+        assert audit is not None
+        assert audit.details["extension"] == "txt"
+        assert "url" not in audit.details
+
+
 def test_chat_media_upload_signed_preview_and_queue(client: TestClient):
     csrf = login(client)
     blocked = client.post(

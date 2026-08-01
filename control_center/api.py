@@ -50,6 +50,7 @@ from .connector import (
     AccountIdentityMismatchError,
 )
 from .history_sync import queue_history_sync
+from .inbound_files import InboundFileError, open_inbound_file, safe_inbound_filename
 from .media import (
     gif_library_media_url,
     infer_media_kind,
@@ -3101,6 +3102,56 @@ def list_chat_messages(
         after_event_id=after_event_id,
         user_id=principal.id if principal.kind == "user" else None,
         limit=limit,
+    )
+
+
+@router.get("/chat/events/{event_id}/download")
+def download_received_chat_file(
+    event_id: int,
+    account_id: str,
+    request: Request,
+    session: Session = Depends(get_db),
+    principal: Principal = Depends(require_scope("read")),
+) -> StreamingResponse:
+    event = _chat_source_event(
+        session,
+        account_id=account_id,
+        event_id=event_id,
+    )
+    kind, media = message_media(event.payload or {})
+    if kind != "file" or not isinstance(media, dict):
+        raise HTTPException(status_code=404, detail="Tin nhắn không chứa tệp tải xuống")
+    source_url = str(media.get("url") or "")
+    if not source_url:
+        raise HTTPException(status_code=410, detail="Tin nhắn không còn liên kết tải tệp")
+    filename = safe_inbound_filename(str(media.get("filename") or "tep-dinh-kem"))
+    max_bytes = request.app.state.settings.inbound_download_max_mb * 1024 * 1024
+    try:
+        opened = open_inbound_file(
+            source_url,
+            filename=filename,
+            range_header=request.headers.get("range"),
+            max_bytes=max_bytes,
+        )
+    except InboundFileError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
+    write_audit(
+        session,
+        principal=principal,
+        action="chat.file.download",
+        resource_type="event",
+        resource_id=str(event.id),
+        details={
+            "account_id": account_id,
+            "thread_id": event.thread_id,
+            "extension": str(media.get("extension") or Path(filename).suffix.lstrip("."))[:16],
+        },
+        request=request,
+    )
+    return StreamingResponse(
+        opened.chunks(),
+        status_code=opened.status_code,
+        headers=opened.headers,
     )
 
 
