@@ -1,0 +1,53 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements.lock
+      - name: Install Python dependencies
+        run: |
+          python -m pip install -r requirements.lock
+          python -m pip install ".[dev]"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          cache: npm
+      - name: Build checked-in assets
+        run: |
+          npm ci
+          npm run build
+          git diff --exit-code -- control_center/static/vendor
+      - name: Lint and tests
+        run: |
+          python -m ruff check control_center tests
+          python -m pytest
+      - name: PowerShell syntax
+        shell: pwsh
+        run: |
+          $failed = $false
+          Get-ChildItem deploy -Recurse -Filter *.ps1 | ForEach-Object {
+            $tokens = $null
+            $errors = $null
+            [System.Management.Automation.Language.Parser]::ParseFile($_.FullName, [ref]$tokens, [ref]$errors) > $null
+            if ($errors.Count) {
+              $failed = $true
+              $errors | ForEach-Object { Write-Error $_.Message }
+            }
+          }
+          if ($failed) { exit 1 }
+      - name: Secret pattern audit
+        shell: pwsh
+        run: .\deploy\windows\Audit-Secrets.ps1

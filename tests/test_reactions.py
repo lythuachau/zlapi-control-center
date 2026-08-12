@@ -41,6 +41,11 @@ def test_complete_native_reaction_catalog_is_available(settings):
         "/-loveu",
         133,
     )
+    assert (
+        by_id["ok"]["glyph"],
+        by_id["ok"]["zalo_icon"],
+        by_id["ok"]["r_type"],
+    ) == ("OK", "/-ok", 68)
     database.dispose()
 
 

@@ -28,6 +28,7 @@ class Settings(BaseSettings):
     auto_create_schema: bool = True
     database_cap_bytes: int = 1_073_741_824
     max_upload_mb: int = Field(default=25, ge=1, le=250)
+    inbound_download_max_mb: int = Field(default=250, ge=1, le=2048)
     gif_library_max_items: int = Field(default=200, ge=1, le=5000)
     gif_library_max_bytes: int = Field(
         default=2_147_483_648,

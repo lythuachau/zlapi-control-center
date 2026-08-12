@@ -7,16 +7,24 @@ import signal
 import socket
 import threading
 
+from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.exc import TimeoutError as SATimeoutError
+
 from .automations import mark_automation_run
 from .config import get_settings
 from .connector import UnsupportedActionError, ZaloConnector
 from .db import Database
+from .history_sync import collect_recent_history, queue_history_sync
+from .listener import store_listener_event
 from .models import AuditLog, Event, Job, ZaloAccount
+from .process_lock import ProcessAlreadyRunningError, ProcessSingleton
 from .profiles import apply_relationship_action
 from .queue import claim_job, complete_job, fail_job, recover_stale_jobs
 from .security import SecretBox
 
 logger = logging.getLogger("zlapi.worker")
+DATABASE_RETRY_INITIAL_SECONDS = 5.0
+DATABASE_RETRY_MAX_SECONDS = 60.0
 
 
 class Worker:
@@ -33,12 +41,48 @@ class Worker:
         self.stop_event.set()
 
     def run(self, once: bool = False) -> None:
-        with self.database.session_factory() as session:
-            recovered = recover_stale_jobs(session)
-            if recovered:
-                logger.warning("Recovered %s stale jobs", recovered)
+        recovered_stale_jobs = False
+        database_retry_delay = DATABASE_RETRY_INITIAL_SECONDS
         while not self.stop_event.is_set():
-            worked = self.run_once()
+            try:
+                if not recovered_stale_jobs:
+                    with self.database.session_factory() as session:
+                        recovered = recover_stale_jobs(session)
+                        if recovered:
+                            logger.warning("Recovered %s stale jobs", recovered)
+                    recovered_stale_jobs = True
+                worked = self.run_once()
+            except SATimeoutError as exc:
+                if once:
+                    raise
+                # Pool exhaustion is not a dead engine; keep existing connections.
+                logger.warning(
+                    "Database pool busy (%s); retrying worker in %.1f seconds",
+                    type(exc).__name__,
+                    database_retry_delay,
+                )
+                self.stop_event.wait(database_retry_delay)
+                database_retry_delay = min(
+                    DATABASE_RETRY_MAX_SECONDS,
+                    database_retry_delay * 2,
+                )
+                continue
+            except SQLAlchemyError as exc:
+                self.database.dispose()
+                if once:
+                    raise
+                logger.warning(
+                    "Database unavailable (%s); retrying worker in %.1f seconds",
+                    type(exc).__name__,
+                    database_retry_delay,
+                )
+                self.stop_event.wait(database_retry_delay)
+                database_retry_delay = min(
+                    DATABASE_RETRY_MAX_SECONDS,
+                    database_retry_delay * 2,
+                )
+                continue
+            database_retry_delay = DATABASE_RETRY_INITIAL_SECONDS
             if once:
                 return
             if worked:
@@ -62,6 +106,14 @@ class Worker:
             try:
                 if action == "__test_account__":
                     result = self.connector.test_account(session, account)
+                    queue_history_sync(
+                        session,
+                        account_id=account.id,
+                        reason="account_verified",
+                        created_by_id=job.created_by_id,
+                    )
+                elif action == "__chat_history_sync__":
+                    result = self._sync_recent_history(session, account)
                 elif action in {
                     "__chat_reaction__",
                     "__chat_automation_reaction__",
@@ -192,6 +244,43 @@ class Worker:
                 logger.exception("Job %s (%s) failed", job_id, action)
             return True
 
+    def _sync_recent_history(self, session, account: ZaloAccount) -> dict:
+        """Import a bounded recent snapshot without replaying chat automations."""
+
+        client = self.connector.client_for(account)
+        account_uid = self.connector.identity_from_payload({}, client.uid)
+        self.connector.validate_identity(session, account, account_uid)
+        if account.zalo_uid != account_uid:
+            account.zalo_uid = account_uid
+            session.commit()
+
+        events = collect_recent_history(client, account_uid=account_uid)
+        imported = 0
+        duplicates = 0
+        for event in events:
+            created = store_listener_event(
+                self.database,
+                account.id,
+                "message.received",
+                event.payload,
+                event.thread_id,
+                created_at=event.occurred_at,
+                dedupe_key_override=event.dedupe_key,
+                process_message_side_effects=False,
+                update_account_heartbeat=False,
+            )
+            if created:
+                imported += 1
+            else:
+                duplicates += 1
+        return {
+            "source": "getLastMsgs",
+            "best_effort": True,
+            "scanned": len(events),
+            "imported": imported,
+            "duplicates": duplicates,
+        }
+
     @staticmethod
     def _emit(session, event_type: str, job: Job, detail: dict) -> None:
         event = Event(
@@ -218,11 +307,26 @@ def main() -> None:
         level=logging.INFO,
         format="%(asctime)s %(levelname)s %(name)s %(message)s",
     )
-    worker = Worker()
-    signal.signal(signal.SIGINT, worker.stop)
-    if hasattr(signal, "SIGTERM"):
-        signal.signal(signal.SIGTERM, worker.stop)
-    worker.run(once=args.once)
+    settings = get_settings()
+    settings.ensure_directories()
+    singleton = ProcessSingleton(
+        settings.data_dir / "run" / "worker.lock",
+        role="worker",
+    )
+    try:
+        singleton.acquire()
+    except ProcessAlreadyRunningError as exc:
+        logger.error("%s; refusing to start a duplicate service", exc)
+        return
+
+    try:
+        worker = Worker()
+        signal.signal(signal.SIGINT, worker.stop)
+        if hasattr(signal, "SIGTERM"):
+            signal.signal(signal.SIGTERM, worker.stop)
+        worker.run(once=args.once)
+    finally:
+        singleton.release()
 
 
 if __name__ == "__main__":

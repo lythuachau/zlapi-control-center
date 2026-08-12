@@ -6,11 +6,17 @@ param(
     [string]$DataRoot = "C:\ZlapiData",
     [string]$SourceRoot = (Resolve-Path (Join-Path $PSScriptRoot "..\..")).Path,
     [string]$WinSWVersion = "v2.12.0",
-    [string]$ExistingCaddyConfig = ""
+    [string]$ExistingCaddyConfig = "",
+    [switch]$ConfirmLegacyAllInOne
 )
 
 $ErrorActionPreference = "Stop"
 Set-StrictMode -Version Latest
+. (Join-Path $PSScriptRoot "Service-ProcessHelpers.ps1")
+
+if (-not $ConfirmLegacyAllInOne) {
+    throw "This legacy all-in-one installer downloads tools, changes firewall/Caddy, installs tasks and starts listeners. Use the staged Prepare-* scripts, or pass -ConfirmLegacyAllInOne after an approved maintenance window."
+}
 
 function Assert-NativeSuccess([string]$Step) {
     if ($LASTEXITCODE -ne 0) {
@@ -29,6 +35,15 @@ $shared = Join-Path $ServiceRoot "shared"
 $logs = Join-Path $DataRoot "logs"
 $caddyData = Join-Path $DataRoot "caddy"
 $useExistingCaddy = -not [string]::IsNullOrWhiteSpace($ExistingCaddyConfig)
+$serviceModules = @{
+    "zlapi-web" = "uvicorn"
+    "zlapi-worker" = "control_center.worker"
+    "zlapi-listener" = "control_center.listener"
+}
+$serviceIds = @("zlapi-web", "zlapi-worker", "zlapi-listener")
+if (-not $useExistingCaddy) {
+    $serviceIds += "zlapi-caddy"
+}
 foreach ($path in @($ServiceRoot, $bin, $shared, $logs, $caddyData)) {
     New-Item -ItemType Directory -Path $path -Force | Out-Null
 }
@@ -72,6 +87,18 @@ if (-not $useExistingCaddy) {
     $serviceTemplates["zlapi-caddy"] = "zlapi-caddy.xml.template"
 }
 
+# Stop wrappers before replacing their executables/configuration, and remove only
+# Python module processes launched from this ServiceRoot. Listener and worker are
+# stopped first so they cannot enqueue or consume work while web is being replaced.
+$stopOrder = @("zlapi-listener", "zlapi-worker", "zlapi-web", "zlapi-caddy")
+foreach ($serviceId in $stopOrder) {
+    if ($serviceId -notin $serviceIds) {
+        continue
+    }
+    $module = if ($serviceModules.ContainsKey($serviceId)) { $serviceModules[$serviceId] } else { "" }
+    Stop-ZlapiServiceSafely -Name $serviceId -ServiceRoot $ServiceRoot -Module $module
+}
+
 foreach ($serviceId in $serviceTemplates.Keys) {
     $wrapper = Join-Path $bin "$serviceId.exe"
     $xml = Join-Path $bin "$serviceId.xml"
@@ -92,16 +119,20 @@ if ($LASTEXITCODE -ne 0) {
     throw "ZLAPI Caddy configuration validation failed."
 }
 
-$serviceIds = @("zlapi-web", "zlapi-worker", "zlapi-listener")
-if (-not $useExistingCaddy) {
-    $serviceIds += "zlapi-caddy"
-}
-
 foreach ($serviceId in $serviceIds) {
     $wrapper = Join-Path $bin "$serviceId.exe"
     if (Get-Service -Name $serviceId -ErrorAction SilentlyContinue) {
-        & $wrapper stop
         & $wrapper uninstall
+        Assert-NativeSuccess "$serviceId uninstallation"
+        foreach ($attempt in 1..30) {
+            if (-not (Get-Service -Name $serviceId -ErrorAction SilentlyContinue)) {
+                break
+            }
+            Start-Sleep -Milliseconds 500
+        }
+        if (Get-Service -Name $serviceId -ErrorAction SilentlyContinue) {
+            throw "$serviceId remains registered after uninstallation."
+        }
     }
     & $wrapper install
     Assert-NativeSuccess "$serviceId installation"
@@ -172,8 +203,23 @@ Register-ScheduledTask `
     -RunLevel Highest `
     -Force | Out-Null
 
-foreach ($serviceId in $serviceIds) {
-    Start-Service -Name $serviceId
+$startOrder = @()
+if (-not $useExistingCaddy) {
+    $startOrder += "zlapi-caddy"
+}
+$startOrder += @("zlapi-web", "zlapi-worker", "zlapi-listener")
+foreach ($serviceId in $startOrder) {
+    $module = if ($serviceModules.ContainsKey($serviceId)) { $serviceModules[$serviceId] } else { "" }
+    if (-not [string]::IsNullOrWhiteSpace($module)) {
+        Remove-ZlapiOrphanModuleProcesses -Module $module -ServiceRoot $ServiceRoot
+    }
+    Start-ZlapiServiceSafely -Name $serviceId
+    if (-not [string]::IsNullOrWhiteSpace($module)) {
+        Assert-ZlapiSingleServiceModuleProcess `
+            -ServiceName $serviceId `
+            -Module $module `
+            -ServiceRoot $ServiceRoot
+    }
 }
 
 $healthy = $false

@@ -150,7 +150,7 @@ body[data-page="chat"] .page > .content {
   padding: 12px 22px;
   border-bottom: 1px solid var(--line);
   background: var(--bar);
-  backdrop-filter: blur(22px);
+  backdrop-filter: none;
 }
 
 .zchat-brand {
@@ -607,7 +607,6 @@ body[data-page="chat"] .page > .content {
 .zchat-filters button.active {
   background: var(--accent-soft);
   color: var(--accent);
-  animation: zchat-pill 260ms cubic-bezier(0.2, 1.3, 0.4, 1);
 }
 
 .zchat-filters span {
@@ -621,6 +620,18 @@ body[data-page="chat"] .page > .content {
   flex: 1;
   overflow-y: auto;
   padding: 4px 8px 12px;
+  overscroll-behavior: contain;
+}
+
+.zchat-virtual-spacer {
+  width: 1px;
+  min-height: 0;
+  pointer-events: none;
+}
+
+.zchat-conversations[data-virtualized="true"] .zchat-conversation {
+  height: 70px;
+  box-sizing: border-box;
 }
 
 .zchat-contacts-panel {
@@ -676,6 +687,12 @@ body[data-page="chat"] .page > .content {
   min-height: 0;
   flex: 1;
   overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
+.zchat-contacts-list[data-virtualized="true"] .zchat-contact-card {
+  height: 76px;
+  box-sizing: border-box;
 }
 
 .zchat-contact-card {
@@ -702,7 +719,6 @@ body[data-page="chat"] .page > .content {
 .zchat-contact-card.active {
   border-left-color: var(--accent);
   background: var(--accent-soft);
-  animation: zchat-row-in 260ms ease-out;
 }
 
 .zchat-contact-card:active {
@@ -1806,7 +1822,6 @@ body[data-page="chat"] .page > .content {
 .zchat-conversation.active {
   border-left-color: var(--accent);
   background: var(--accent-soft);
-  animation: zchat-row-in 260ms ease-out;
 }
 
 .zchat-conversation-copy {
@@ -1974,7 +1989,7 @@ body[data-page="chat"] .page > .content {
   display: grid;
   min-width: 0;
   min-height: 0;
-  grid-template-rows: auto minmax(0, 1fr) auto auto auto;
+  grid-template-rows: auto auto minmax(0, 1fr) auto auto auto;
   overflow: hidden;
   background:
     linear-gradient(var(--line) 1px, transparent 1px),
@@ -2005,6 +2020,36 @@ body[data-page="chat"] .page > .content {
   padding: 12px 18px;
   border-bottom: 1px solid var(--line);
   background: color-mix(in srgb, var(--panel) 92%, transparent);
+}
+
+.zchat-connection-banner {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  justify-content: center;
+  flex-wrap: wrap;
+  gap: 12px;
+  padding: 8px 16px;
+  border-bottom: 1px solid color-mix(in srgb, #f59e0b 34%, var(--line));
+  background: color-mix(in srgb, #f59e0b 10%, var(--panel));
+  color: color-mix(in srgb, #f59e0b 78%, var(--ink));
+  font-size: 9px;
+  text-align: center;
+}
+
+.zchat-connection-banner a {
+  flex: 0 0 auto;
+  border: 1px solid color-mix(in srgb, #f59e0b 42%, var(--line));
+  border-radius: 999px;
+  padding: 5px 9px;
+  background: color-mix(in srgb, #f59e0b 8%, var(--raised));
+  color: inherit;
+  font-size: 8px;
+  text-decoration: none;
+}
+
+.zchat-connection-banner a:hover {
+  border-color: #f59e0b;
 }
 
 .zchat-contact {
@@ -2060,6 +2105,11 @@ body[data-page="chat"] .page > .content {
   overflow-y: auto;
   padding: 20px 24px 12px;
   overflow-anchor: auto;
+  overscroll-behavior: contain;
+}
+
+.zchat-messages.is-positioning {
+  overflow-anchor: none;
 }
 
 .zchat-scroll-fab {
@@ -2075,10 +2125,8 @@ body[data-page="chat"] .page > .content {
   padding: 0;
   background: color-mix(in srgb, var(--raised) 96%, transparent);
   color: var(--accent);
-  box-shadow:
-    0 12px 34px rgba(0, 0, 0, 0.3),
-    inset 0 1px 0 color-mix(in srgb, white 20%, transparent);
-  backdrop-filter: blur(18px);
+  box-shadow: 0 8px 20px rgba(0, 0, 0, 0.2);
+  backdrop-filter: none;
   transition:
     transform 160ms ease,
     border-color 160ms ease,
@@ -2215,6 +2263,11 @@ body[data-page="chat"] .page > .content {
   align-items: flex-end;
   gap: 8px;
   margin: 13px 0;
+  content-visibility: auto;
+  contain-intrinsic-size: auto 96px;
+}
+
+.zchat-message.is-new {
   animation: zchat-message-in 220ms ease-out;
 }
 
@@ -2243,7 +2296,38 @@ body[data-page="chat"] .page > .content {
   font-size: 11px;
   line-height: 1.55;
   overflow-wrap: anywhere;
-  box-shadow: 0 8px 22px rgba(0, 0, 0, 0.07);
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.055);
+}
+
+.zchat-message-bubble.has-text,
+.zchat-media-caption {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
+.zchat-message-link {
+  color: var(--accent);
+  font-weight: 800;
+  text-decoration: underline;
+  text-decoration-thickness: 1px;
+  text-underline-offset: 2px;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
+.zchat-message.mine .zchat-message-link {
+  color: inherit;
+}
+
+.zchat-message-link:hover {
+  text-decoration-thickness: 2px;
+}
+
+.zchat-message-link:focus-visible {
+  border-radius: 3px;
+  outline: 2px solid currentColor;
+  outline-offset: 2px;
 }
 
 .zchat-message.mine .zchat-message-bubble {
@@ -2268,6 +2352,16 @@ body[data-page="chat"] .page > .content {
   border-radius: 12px;
   background: color-mix(in srgb, var(--studio) 74%, transparent);
   object-fit: contain;
+}
+
+.zchat-message-bubble.has-media .zchat-media-link {
+  min-width: min(220px, 56vw);
+  min-height: 120px;
+}
+
+.zchat-media-video:not([width]):not([height]) {
+  min-width: min(280px, 68vw);
+  min-height: 158px;
 }
 
 .zchat-media-link {
@@ -2658,6 +2752,14 @@ button.zchat-poll-card {
 .zchat-reaction-summary button span {
   font-family: "Segoe UI Emoji", "Apple Color Emoji", sans-serif;
   font-size: 14px;
+}
+
+.zchat-reaction-wordmark {
+  font-family: "Arial Rounded MT Bold", "Nunito", system-ui, sans-serif !important;
+  font-size: 0.68em !important;
+  font-weight: 900;
+  letter-spacing: -0.04em;
+  line-height: 1;
 }
 
 .zchat-reaction-summary button b {
@@ -3294,6 +3396,16 @@ button.zchat-poll-card {
   max-height: 340px;
   overflow-y: auto;
   padding-right: 3px;
+  overscroll-behavior: contain;
+}
+
+.zchat-group-members-list[data-virtualized="true"] {
+  gap: 0;
+}
+
+.zchat-group-members-list[data-virtualized="true"] .zchat-group-member {
+  height: 58px;
+  box-sizing: border-box;
 }
 
 .zchat-group-member {
@@ -3871,8 +3983,8 @@ button.zchat-poll-card {
   border: 1px solid var(--line-strong);
   border-radius: 18px;
   background: color-mix(in srgb, var(--raised) 96%, transparent);
-  box-shadow: var(--shadow);
-  backdrop-filter: blur(24px);
+  box-shadow: 0 10px 28px rgba(0, 0, 0, 0.2);
+  backdrop-filter: none;
 }
 
 .zchat-reaction-picker {
@@ -3999,7 +4111,7 @@ button.zchat-poll-card {
 
 .zchat-dialog::backdrop {
   background: rgba(3, 7, 18, 0.68);
-  backdrop-filter: blur(5px);
+  backdrop-filter: none;
 }
 
 .zchat-dialog-shell {
@@ -4581,6 +4693,8 @@ button.zchat-poll-card {
   background:
     radial-gradient(circle at 50% 24%, color-mix(in srgb, var(--accent) 10%, transparent), transparent 60%),
     var(--muted-panel);
+  content-visibility: auto;
+  contain-intrinsic-size: auto 126px;
   color: var(--ink);
   transition: border-color 150ms ease, transform 150ms ease, background 150ms ease;
 }
@@ -4651,6 +4765,8 @@ button.zchat-poll-card {
   border-radius: 15px;
   padding: 0;
   background: var(--muted-panel);
+  content-visibility: auto;
+  contain-intrinsic-size: auto 154px;
   color: var(--ink);
   text-align: left;
   transition: border-color 150ms ease, transform 150ms ease, background 150ms ease;
@@ -4994,6 +5110,16 @@ button.zchat-poll-card {
   gap: 6px;
   max-height: 360px;
   overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
+.zchat-rich-contact-list[data-virtualized="true"] {
+  gap: 0;
+}
+
+.zchat-rich-contact-list[data-virtualized="true"] .zchat-rich-contact-item {
+  height: 62px;
+  box-sizing: border-box;
 }
 
 .zchat-rich-contact-item {

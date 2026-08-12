@@ -6,13 +6,29 @@
   if (!app || !control) return;
 
   const { api, toast } = control;
+  const chatText = window.ZChatText;
   const $ = (selector, root = document) => root.querySelector(selector);
   const $$ = (selector, root = document) => [...root.querySelectorAll(selector)];
   const MAX_QUICK_REACTIONS = 40;
+  const MESSAGE_PAGE_SIZE = 180;
+  const FIXED_LIST_VIRTUAL_THRESHOLD = 60;
+  const FIXED_LIST_OVERSCAN = 8;
+  const SELECTED_ACCOUNT_STORAGE_KEY = "zlapi-chat-selected-account-id";
+  const timeFormatter = new Intl.DateTimeFormat("vi-VN", {
+    hour: "2-digit",
+    minute: "2-digit",
+  });
+  const dateFormatter = new Intl.DateTimeFormat("vi-VN", {
+    day: "2-digit",
+    month: "2-digit",
+  });
   const state = {
     accountId: "",
     activeThread: null,
     conversations: [],
+    conversationsAccountId: "",
+    conversationCache: new Map(),
+    conversationRequestId: 0,
     nav: "messages",
     filter: "all",
     search: "",
@@ -72,6 +88,11 @@
     canManageAutomations: app.dataset.canManageAutomations === "true",
     reloadTimer: null,
     messageReloadTimer: null,
+    messageIncrementalTimer: null,
+    realtimeRecoveryTimer: null,
+    realtimeRecoveryRunning: false,
+    messageIncrementalRunning: false,
+    messageIncrementalQueuedThread: "",
     messageRequestId: 0,
     messagePagination: {
       hasOlder: false,
@@ -80,6 +101,11 @@
     },
     unreadReview: null,
     unreadViewportFrame: null,
+    messageScrollFrame: null,
+    messageNavigation: null,
+    messageNavigationSequence: 0,
+    historyLoadBlockedUntil: 0,
+    scrollAnchorReleaseFrame: null,
     followLatest: false,
     bottomSettleTimers: [],
     lastExitReadKey: "",
@@ -93,6 +119,7 @@
     forwardSelection: new Map(),
     pendingReactionJobs: new Map(),
     reactionManagerDraft: [],
+    reactionPickerSignature: "",
     canManageReactions: app.dataset.canManageReactions === "true",
     attachments: [],
     attachmentSequence: 0,
@@ -114,9 +141,77 @@
     canManageGifLibrary: app.dataset.canManageGifLibrary === "true",
     richContactSearch: "",
     lastMessageScrollTop: 0,
+    conversationVirtualFrame: null,
+    contactsVirtualFrame: null,
+    groupMembersVirtualFrame: null,
+    richContactsVirtualFrame: null,
   };
 
+  const libraryImageTimers = new WeakMap();
+  let libraryImageObserver = null;
+
+  function observeLibraryImage(image, source, { animated = false } = {}) {
+    if (!source) return;
+    image.loading = "lazy";
+    image.decoding = "async";
+    image.fetchPriority = "low";
+    if (!window.IntersectionObserver) {
+      image.src = source;
+      return;
+    }
+    if (!libraryImageObserver) {
+      libraryImageObserver = new IntersectionObserver((entries) => {
+        for (const entry of entries) {
+          const node = entry.target;
+          const timer = libraryImageTimers.get(node);
+          if (timer) {
+            window.clearTimeout(timer);
+            libraryImageTimers.delete(node);
+          }
+          if (!node.isConnected) {
+            libraryImageObserver.unobserve(node);
+            continue;
+          }
+          if (entry.isIntersecting) {
+            if (!node.getAttribute("src")) node.src = node.dataset.librarySrc;
+            if (node.dataset.libraryAnimated !== "true") {
+              libraryImageObserver.unobserve(node);
+            }
+            continue;
+          }
+          if (node.dataset.libraryAnimated === "true" && node.getAttribute("src")) {
+            const unloadTimer = window.setTimeout(() => {
+              if (!node.isConnected) {
+                libraryImageObserver.unobserve(node);
+              } else {
+                node.removeAttribute("src");
+              }
+              libraryImageTimers.delete(node);
+            }, 500);
+            libraryImageTimers.set(node, unloadTimer);
+          }
+        }
+      }, { rootMargin: "320px 0px", threshold: 0.01 });
+    }
+    image.dataset.librarySrc = source;
+    image.dataset.libraryAnimated = String(animated);
+    libraryImageObserver.observe(image);
+  }
+
+  function cleanupLibraryImages(root) {
+    if (!root || !libraryImageObserver) return;
+    for (const image of root.querySelectorAll("[data-library-src]")) {
+      const timer = libraryImageTimers.get(image);
+      if (timer) window.clearTimeout(timer);
+      libraryImageTimers.delete(image);
+      libraryImageObserver.unobserve(image);
+    }
+  }
+
   const accountSelect = $("#chat-account");
+  const connectionBanner = $("#chat-connection-banner");
+  const connectionBannerCopy = $("#chat-connection-banner-copy");
+  const connectionBannerAction = $("#chat-connection-banner-action");
   const conversationList = $("#chat-conversations");
   const conversationSearch = $("#chat-search")?.closest(".zchat-search");
   const conversationFilters = $(".zchat-filters");
@@ -357,6 +452,8 @@
       image.src = item.avatar_url;
       image.alt = "";
       image.loading = "lazy";
+      image.decoding = "async";
+      image.fetchPriority = "low";
       image.referrerPolicy = "no-referrer";
       image.addEventListener("error", () => image.remove(), { once: true });
       node.append(image);
@@ -377,19 +474,38 @@
     if (Number.isNaN(date.getTime())) return "—";
     const today = new Date();
     if (date.toDateString() === today.toDateString()) {
-      return new Intl.DateTimeFormat("vi-VN", {
-        hour: "2-digit",
-        minute: "2-digit",
-      }).format(date);
+      return timeFormatter.format(date);
     }
-    return new Intl.DateTimeFormat("vi-VN", {
-      day: "2-digit",
-      month: "2-digit",
-    }).format(date);
+    return dateFormatter.format(date);
   }
 
   function selectedAccountOption() {
     return accountSelect?.selectedOptions?.[0] || null;
+  }
+
+  function restoreSelectedAccount() {
+    if (!accountSelect) return;
+    try {
+      const savedAccountId = localStorage.getItem(SELECTED_ACCOUNT_STORAGE_KEY);
+      if (
+        savedAccountId
+        && [...accountSelect.options].some((option) => option.value === savedAccountId)
+      ) {
+        accountSelect.value = savedAccountId;
+      }
+    } catch {
+      // Browsers can deny localStorage in strict privacy modes. Selection still works
+      // for the current page, so no user-facing error is needed here.
+    }
+  }
+
+  function rememberSelectedAccount() {
+    if (!state.accountId) return;
+    try {
+      localStorage.setItem(SELECTED_ACCOUNT_STORAGE_KEY, state.accountId);
+    } catch {
+      // Keep account switching functional even when persistent storage is unavailable.
+    }
   }
 
   function accountIsReady() {
@@ -397,6 +513,7 @@
     return Boolean(
       option &&
       option.value &&
+      option.dataset.enabled === "true" &&
       option.dataset.status === "online" &&
       option.dataset.listener === "true",
     );
@@ -406,15 +523,22 @@
     const option = selectedAccountOption();
     const name = option?.dataset.name || "Chưa chọn tài khoản";
     const status = option?.dataset.status || "missing";
+    const enabled = option?.dataset.enabled === "true";
     const listener = option?.dataset.listener === "true";
-    const ready = status === "online" && listener;
+    const hasAccount = Boolean(option?.value);
+    const ready = hasAccount && enabled && status === "online" && listener;
+    const sessionError = ["error", "identity_mismatch"].includes(status);
     const listenerState = $("#chat-listener-state");
 
     $("#chat-account-name").textContent = name;
     $("#chat-detail-account").textContent = name;
     $("#chat-account-status").textContent = ready
       ? "Listener đang kết nối"
-      : status === "error"
+      : !hasAccount
+        ? "Chưa có tài khoản Zalo"
+        : !enabled
+          ? "Tài khoản đã tắt · lịch sử chỉ đọc"
+          : sessionError
         ? "Phiên lỗi · chờ admin cập nhật"
         : listener
           ? `Listener ${status}`
@@ -424,20 +548,46 @@
     $("#chat-health-title").textContent = ready ? "Kết nối ổn định" : "Chưa thể gửi tin";
     $("#chat-health-copy").textContent = ready
       ? "Đang nhận sự kiện và có thể xếp hàng gửi."
-      : status === "error"
+      : !hasAccount
+        ? "Hãy thêm tài khoản trong Control Center để bắt đầu."
+        : !enabled
+          ? "Tài khoản đang ở chế độ chỉ đọc; lịch sử đã lưu vẫn có thể xem."
+          : sessionError
         ? "Admin cần cập nhật cookie/IMEI và bật lại Listener."
         : "Hãy kiểm tra trạng thái tài khoản trong Control Center.";
     $(".zchat-health-card")?.classList.toggle("online", ready);
-    $(".zchat-health-card")?.classList.toggle("error", status === "error");
+    $(".zchat-health-card")?.classList.toggle("error", hasAccount && !ready);
     listenerState?.classList.toggle("online", ready);
-    listenerState?.classList.toggle("error", status === "error");
+    listenerState?.classList.toggle("error", sessionError);
     if (listenerState) {
       listenerState.querySelector("span").textContent = ready
         ? "Listener online"
-        : status === "error"
+        : !hasAccount
+          ? "Chưa chọn tài khoản"
+          : !enabled
+            ? "Lịch sử chỉ đọc"
+            : sessionError
           ? "Phiên cần cập nhật"
           : "Listener chưa sẵn sàng";
     }
+    if (connectionBanner) {
+      connectionBanner.hidden = !hasAccount || ready;
+    }
+    if (connectionBannerCopy && connectionBannerAction && hasAccount && !ready) {
+      if (!enabled) {
+        connectionBannerCopy.textContent = "Tài khoản đã tắt — lịch sử vẫn an toàn và đang ở chế độ chỉ đọc";
+        connectionBannerAction.textContent = "Quản lý tài khoản";
+      } else if (status === "online" && !listener) {
+        connectionBannerCopy.textContent = "Phiên đã xác minh — hãy bật Listener để gửi và nhận tin realtime";
+        connectionBannerAction.textContent = "Bật Listener";
+      } else {
+        connectionBannerCopy.textContent = "Mất kết nối — lịch sử vẫn an toàn; cập nhật phiên để gửi tiếp";
+        connectionBannerAction.textContent = "Cập nhật phiên";
+      }
+    }
+    if (contactsRefresh) contactsRefresh.disabled = !ready;
+    app.classList.toggle("account-read-only", hasAccount && !ready);
+    renderRichPreview();
     updateComposer();
   }
 
@@ -459,7 +609,7 @@
     } else if (!state.activeThread) {
       draft.placeholder = "Chọn hội thoại để bắt đầu…";
     } else if (!accountIsReady()) {
-      draft.placeholder = "Listener phải online trước khi gửi…";
+      draft.placeholder = "Mất kết nối — lịch sử vẫn an toàn; cập nhật phiên để gửi tiếp";
     } else {
       draft.placeholder = `Nhắn tin cho ${state.activeThread.name}…`;
     }
@@ -544,6 +694,7 @@
         const image = document.createElement("img");
         image.src = item.objectUrl;
         image.alt = "";
+        image.decoding = "async";
         preview.append(image);
       } else if (item.kind === "video") {
         const video = document.createElement("video");
@@ -691,7 +842,9 @@
     const item = state.richDraft;
     richPreviewMedia.replaceChildren();
     richPreviewCard.classList.toggle("empty", !item);
-    if (richSend) richSend.disabled = !item || state.richUploading;
+    if (richSend) {
+      richSend.disabled = !item || !accountIsReady() || state.richUploading;
+    }
     if (!item) {
       richPreviewMedia.textContent = "✦";
       richPreviewTitle.textContent = "Chưa chọn nội dung";
@@ -707,6 +860,7 @@
       image.className = "sticker";
       image.src = item.thumbnail_url;
       image.alt = `Sticker ${item.sticker_id}`;
+      image.decoding = "async";
       image.addEventListener("error", () => {
         richPreviewMedia.textContent = "STK";
       }, { once: true });
@@ -718,6 +872,7 @@
       const image = document.createElement("img");
       image.src = item.objectUrl || item.preview_url;
       image.alt = item.file?.name || item.name || "GIF";
+      image.decoding = "async";
       richPreviewMedia.append(image);
       richPreviewTitle.textContent = item.file?.name || item.name || "GIF";
       richPreviewCopy.textContent = item.libraryId
@@ -865,6 +1020,7 @@
 
   function renderStickerCatalog() {
     if (!stickerGrid) return;
+    cleanupLibraryImages(stickerGrid);
     const items = visibleStickers();
     if (!items.length) {
       const empty = document.createElement("div");
@@ -887,9 +1043,8 @@
       card.tabIndex = 0;
       card.setAttribute("aria-label", `Xem trước sticker ${item.sticker_id}`);
       const image = document.createElement("img");
-      image.src = item.thumbnail_url;
       image.alt = "";
-      image.loading = "lazy";
+      observeLibraryImage(image, item.thumbnail_url, { animated: true });
       const code = document.createElement("small");
       code.textContent = `${item.category_id}:${item.sticker_id}`;
       const favorite = document.createElement("button");
@@ -1069,6 +1224,7 @@
 
   function renderGifLibrary() {
     if (!gifGrid) return;
+    cleanupLibraryImages(gifGrid);
     $$("[data-gif-filter]").forEach((button) => {
       button.classList.toggle("active", button.dataset.gifFilter === state.gifFilter);
     });
@@ -1093,9 +1249,8 @@
         card.setAttribute("aria-label", `Xem trước GIF ${item.name}`);
 
         const image = document.createElement("img");
-        image.src = item.preview_url;
         image.alt = "";
-        image.loading = "lazy";
+        observeLibraryImage(image, item.preview_url, { animated: true });
         const copy = document.createElement("span");
         copy.className = "zchat-gif-item-copy";
         const name = document.createElement("strong");
@@ -1260,6 +1415,46 @@
     }
   }
 
+  function renderRichContact(item) {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = `zchat-rich-contact-item${
+      state.richDraft?.kind === "contact"
+      && state.richDraft.contact_user_id === item.user_id
+        ? " selected"
+        : ""
+    }`;
+    const avatar = document.createElement("span");
+    paintAvatar(avatar, {
+      ...item,
+      thread_id: item.user_id,
+      thread_type: "user",
+    });
+    const copy = document.createElement("span");
+    const name = document.createElement("strong");
+    name.textContent = item.name;
+    const detail = document.createElement("small");
+    detail.textContent = item.phone || `ID ${item.user_id}`;
+    copy.append(name, detail);
+    const presence = document.createElement("i");
+    presence.className = item.online ? "online" : "";
+    button.append(avatar, copy, presence);
+    button.addEventListener("click", () => {
+      setRichDraft({
+        kind: "contact",
+        label: item.name,
+        contact_user_id: item.user_id,
+        contact_name: item.name,
+        contact_phone: item.phone || null,
+        contact_qr_url: "",
+        avatar_url: item.avatar_url || null,
+        initials: item.initials,
+      });
+      renderRichContacts();
+    });
+    return button;
+  }
+
   function renderRichContacts() {
     if (!richContactList) return;
     const term = state.richContactSearch.toLocaleLowerCase("vi");
@@ -1278,45 +1473,9 @@
       richContactList.replaceChildren(empty);
       return;
     }
-    richContactList.replaceChildren(...items.map((item) => {
-      const button = document.createElement("button");
-      button.type = "button";
-      button.className = `zchat-rich-contact-item${
-        state.richDraft?.kind === "contact"
-        && state.richDraft.contact_user_id === item.user_id
-          ? " selected"
-          : ""
-      }`;
-      const avatar = document.createElement("span");
-      paintAvatar(avatar, {
-        ...item,
-        thread_id: item.user_id,
-        thread_type: "user",
-      });
-      const copy = document.createElement("span");
-      const name = document.createElement("strong");
-      name.textContent = item.name;
-      const detail = document.createElement("small");
-      detail.textContent = item.phone || `ID ${item.user_id}`;
-      copy.append(name, detail);
-      const presence = document.createElement("i");
-      presence.className = item.online ? "online" : "";
-      button.append(avatar, copy, presence);
-      button.addEventListener("click", () => {
-        setRichDraft({
-          kind: "contact",
-          label: item.name,
-          contact_user_id: item.user_id,
-          contact_name: item.name,
-          contact_phone: item.phone || null,
-          contact_qr_url: "",
-          avatar_url: item.avatar_url || null,
-          initials: item.initials,
-        });
-        renderRichContacts();
-      });
-      return button;
-    }));
+    richContactList.replaceChildren(
+      ...virtualFixedNodes(richContactList, items, renderRichContact, 62),
+    );
   }
 
   function validHttpUrl(value) {
@@ -1603,6 +1762,60 @@
     if (!state.contacts.length) void loadContacts();
   }
 
+  function virtualFixedNodes(container, items, renderItem, rowHeight) {
+    if (!container || items.length < FIXED_LIST_VIRTUAL_THRESHOLD) {
+      container?.removeAttribute("data-virtualized");
+      return items.map(renderItem);
+    }
+    container.dataset.virtualized = "true";
+    const viewportHeight = Math.max(container.clientHeight || 0, 420);
+    const visibleRows = Math.ceil(viewportHeight / rowHeight);
+    const rawStart = Math.max(
+      0,
+      Math.floor(container.scrollTop / rowHeight) - FIXED_LIST_OVERSCAN,
+    );
+    const start = Math.min(
+      rawStart,
+      Math.max(0, items.length - visibleRows),
+    );
+    const end = Math.min(
+      items.length,
+      start + visibleRows + (FIXED_LIST_OVERSCAN * 2),
+    );
+    const topSpacer = document.createElement("div");
+    topSpacer.className = "zchat-virtual-spacer";
+    topSpacer.style.height = `${start * rowHeight}px`;
+    topSpacer.setAttribute("aria-hidden", "true");
+    const bottomSpacer = document.createElement("div");
+    bottomSpacer.className = "zchat-virtual-spacer";
+    bottomSpacer.style.height = `${Math.max(0, items.length - end) * rowHeight}px`;
+    bottomSpacer.setAttribute("aria-hidden", "true");
+    return [
+      topSpacer,
+      ...items.slice(start, end).map(renderItem),
+      bottomSpacer,
+    ];
+  }
+
+  function scheduleFixedListRender(kind) {
+    const frameKeys = {
+      contacts: "contactsVirtualFrame",
+      conversations: "conversationVirtualFrame",
+      groupMembers: "groupMembersVirtualFrame",
+      richContacts: "richContactsVirtualFrame",
+    };
+    const frameKey = frameKeys[kind];
+    if (!frameKey) return;
+    if (state[frameKey] !== null) return;
+    state[frameKey] = window.requestAnimationFrame(() => {
+      state[frameKey] = null;
+      if (kind === "contacts") renderContacts();
+      else if (kind === "groupMembers") renderGroupMemberWindow();
+      else if (kind === "richContacts") renderRichContacts();
+      else renderConversations();
+    });
+  }
+
   function renderConversation(item) {
     const button = document.createElement("button");
     button.type = "button";
@@ -1680,7 +1893,9 @@
       conversationList.replaceChildren(empty);
       return;
     }
-    conversationList.replaceChildren(...items.map(renderConversation));
+    conversationList.replaceChildren(
+      ...virtualFixedNodes(conversationList, items, renderConversation, 70),
+    );
   }
 
   function visibleContacts() {
@@ -1747,7 +1962,9 @@
       contactsList.replaceChildren(empty);
       return;
     }
-    contactsList.replaceChildren(...items.map(renderContact));
+    contactsList.replaceChildren(
+      ...virtualFixedNodes(contactsList, items, renderContact, 76),
+    );
   }
 
   function setAutomationNotice(message, tone = "") {
@@ -1797,6 +2014,7 @@
         image.src = item.avatar_url;
         image.alt = "";
         image.loading = "lazy";
+        image.decoding = "async";
         image.addEventListener("error", () => image.remove(), { once: true });
         avatar.append(image);
       }
@@ -1845,6 +2063,7 @@
     const image = document.createElement("img");
     image.src = sticker.thumbnail_url;
     image.alt = "";
+    image.decoding = "async";
     image.addEventListener("error", () => {
       preview.textContent = "STK";
     }, { once: true });
@@ -1861,6 +2080,7 @@
 
   function renderAutomationStickers() {
     if (!automationStickers) return;
+    cleanupLibraryImages(automationStickers);
     if (!state.stickerCatalog.length) {
       const empty = document.createElement("div");
       empty.className = "zchat-list-empty";
@@ -1885,9 +2105,8 @@
         : "Sticker không hợp lệ";
       if (sticker) {
         const image = document.createElement("img");
-        image.src = sticker.thumbnail_url;
         image.alt = "";
-        image.loading = "lazy";
+        observeLibraryImage(image, sticker.thumbnail_url, { animated: true });
         button.append(image);
         button.addEventListener("click", () => {
           state.automationSticker = sticker;
@@ -1899,6 +2118,23 @@
     });
     automationStickers.replaceChildren(...nodes);
     renderAutomationStickerSelection();
+  }
+
+  function automationCompatibleReactions(items) {
+    return Array.isArray(items)
+      ? items.filter(
+        (item) => item?.enabled !== false
+          && (item?.mode === "native" || item?.mode === "experimental"),
+      )
+      : [];
+  }
+
+  function syncAutomationReactionsFromCatalog(items) {
+    state.automationReactions = automationCompatibleReactions(items);
+    if (!state.automationReactions.some((item) => item.id === state.automationReactionId)) {
+      state.automationReactionId = state.automationReactions[0]?.id || "";
+    }
+    renderAutomationReactions();
   }
 
   function renderAutomationReactions() {
@@ -1923,9 +2159,12 @@
       button.className = `zchat-automation-reaction${
         item.id === state.automationReactionId ? " selected" : ""
       }`;
+      if (item.glyph === "OK") button.classList.add("zchat-reaction-wordmark");
       button.disabled = !state.canManageAutomations;
       button.textContent = item.glyph;
-      button.title = `${item.label} · Reaction Zalo đã xác nhận`;
+      button.title = `${item.label} · ${
+        item.mode === "experimental" ? "Reaction Zalo thử nghiệm" : "Reaction Zalo"
+      }`;
       button.setAttribute("aria-label", `Chọn reaction ${item.label}`);
       button.setAttribute(
         "aria-pressed",
@@ -1939,7 +2178,9 @@
     });
     automationReactions.replaceChildren(...nodes);
     automationReactionStatus.textContent = selected
-      ? `${selected.glyph} ${selected.label}`
+      ? `${selected.glyph} ${selected.label}${
+        selected.mode === "experimental" ? " · Thử nghiệm" : ""
+      }`
       : "Chưa chọn";
   }
 
@@ -1963,7 +2204,7 @@
     state.automationRule = rule;
     state.automationGroups = Array.isArray(result?.groups) ? result.groups : [];
     state.automationReactions = Array.isArray(result?.reactions)
-      ? result.reactions.filter((item) => item?.mode === "native" && item?.verified)
+      ? automationCompatibleReactions(result.reactions)
       : [];
     state.automationSelectedGroups = new Set(
       (Array.isArray(rule.group_ids) ? rule.group_ids : [])
@@ -2432,15 +2673,23 @@
 
   async function loadConversations({ preserveSelection = true } = {}) {
     if (!state.accountId) {
+      state.conversationRequestId += 1;
       state.conversations = [];
+      state.conversationsAccountId = "";
       renderConversations();
       return;
     }
+    const accountId = state.accountId;
+    const requestId = ++state.conversationRequestId;
     conversationList.setAttribute("aria-busy", "true");
     try {
-      state.conversations = await api(
-        `/api/v1/chat/conversations?account_id=${encodeURIComponent(state.accountId)}&limit=150`,
+      const conversations = await api(
+        `/api/v1/chat/conversations?account_id=${encodeURIComponent(accountId)}&limit=150`,
       );
+      if (requestId !== state.conversationRequestId || state.accountId !== accountId) return;
+      state.conversations = Array.isArray(conversations) ? conversations : [];
+      state.conversationsAccountId = accountId;
+      state.conversationCache.set(accountId, state.conversations);
       void syncMissingProfiles(state.conversations);
       if (state.activeThread) {
         const refreshed = state.conversations.find(
@@ -2476,11 +2725,22 @@
         clearActiveThread();
       }
     } catch (error) {
-      toast(error.message, "error");
-      state.conversations = [];
+      if (requestId !== state.conversationRequestId || state.accountId !== accountId) return;
+      if (state.conversationsAccountId !== accountId) {
+        state.conversations = state.conversationCache.get(accountId) || [];
+        state.conversationsAccountId = accountId;
+      }
       renderConversations();
+      toast(
+        state.conversations.length
+          ? `Không thể làm mới hội thoại: ${error.message}. Đang hiển thị dữ liệu đã tải.`
+          : `Không thể tải hội thoại: ${error.message}. Lịch sử trên máy chủ không bị xóa.`,
+        "error",
+      );
     } finally {
-      conversationList.removeAttribute("aria-busy");
+      if (requestId === state.conversationRequestId) {
+        conversationList.removeAttribute("aria-busy");
+      }
     }
   }
 
@@ -2557,13 +2817,84 @@
     if (!captionText) return;
     const caption = document.createElement("span");
     caption.className = "zchat-media-caption";
-    caption.textContent = captionText;
+    if (chatText?.appendLinkedText) {
+      chatText.appendLinkedText(caption, captionText);
+    } else {
+      caption.textContent = captionText;
+    }
     container.append(caption);
+  }
+
+  let deferredMediaObserver = null;
+
+  function ensureDeferredMediaObserver() {
+    if (deferredMediaObserver || !window.IntersectionObserver) {
+      return deferredMediaObserver;
+    }
+    deferredMediaObserver = new IntersectionObserver((entries) => {
+      for (const entry of entries) {
+        const media = entry.target;
+        if (!media.isConnected) {
+          deferredMediaObserver.unobserve(media);
+          continue;
+        }
+        if (entry.isIntersecting) {
+          const source = media.dataset.deferredSrc;
+          if (source && media.getAttribute("src") !== source) {
+            media.src = source;
+            if (media instanceof HTMLVideoElement) media.load();
+          }
+          continue;
+        }
+        if (media instanceof HTMLVideoElement) {
+          media.pause();
+        } else if (media.dataset.mediaKind === "gif" && media.dataset.posterSrc) {
+          media.src = media.dataset.posterSrc;
+        }
+      }
+    }, {
+      root: messagesNode,
+      rootMargin: "600px 0px",
+      threshold: 0.01,
+    });
+    return deferredMediaObserver;
+  }
+
+  function observeDeferredMedia(media, source, { kind = "", poster = "" } = {}) {
+    if (!source) return;
+    const observer = ensureDeferredMediaObserver();
+    if (!observer) {
+      media.src = source;
+      return;
+    }
+    media.dataset.deferredSrc = source;
+    media.dataset.mediaKind = kind;
+    if (poster) media.dataset.posterSrc = poster;
+    observer.observe(media);
+  }
+
+  function cleanupDeferredMedia(root) {
+    if (!deferredMediaObserver || !root) return;
+    for (const media of root.querySelectorAll("[data-deferred-src]")) {
+      deferredMediaObserver.unobserve(media);
+    }
+  }
+
+  function applyMediaDimensions(node, media) {
+    const width = Number(media.width) || 0;
+    const height = Number(media.height) || 0;
+    if (width > 0) node.width = width;
+    if (height > 0) node.height = height;
+    if (width > 0 && height > 0) {
+      const ratio = Math.min(Math.max(width / height, 0.25), 4);
+      node.style.aspectRatio = String(ratio);
+    }
   }
 
   function addMediaImage(container, message, { sticker = false } = {}) {
     const media = message.media || {};
-    const source = media.thumbnail_url || media.url;
+    const isGif = message.kind === "gif" || media.animated === true;
+    const source = isGif ? (media.url || media.thumbnail_url) : (media.thumbnail_url || media.url);
     if (!source) {
       const fallback = document.createElement("span");
       fallback.className = sticker ? "zchat-sticker" : "zchat-media-fallback";
@@ -2585,12 +2916,18 @@
     image.className = sticker
       ? "zchat-media-image zchat-sticker-image"
       : "zchat-media-image";
-    image.src = source;
     image.alt = message.text === "[Hình ảnh]" ? "Hình ảnh trong hội thoại" : message.text;
     image.loading = "lazy";
+    image.decoding = "async";
+    image.fetchPriority = "low";
     image.referrerPolicy = "no-referrer";
-    if (Number(media.width) > 0) image.width = Number(media.width);
-    if (Number(media.height) > 0) image.height = Number(media.height);
+    applyMediaDimensions(image, media);
+    const poster = isGif && media.thumbnail_url && media.thumbnail_url !== source
+      ? media.thumbnail_url
+      : "";
+    if (poster) image.src = poster;
+    if (isGif) observeDeferredMedia(image, source, { kind: "gif", poster });
+    else image.src = source;
     image.addEventListener("error", () => {
       const fallback = document.createElement("span");
       fallback.className = sticker ? "zchat-sticker" : "zchat-media-fallback";
@@ -2604,13 +2941,41 @@
     addMediaCaption(container, message);
   }
 
+  function messageDownloadUrl(message) {
+    if (
+      message?.kind === "file"
+      && !message.mine
+      && Number(message.event_id) > 0
+      && state.accountId
+    ) {
+      const query = new URLSearchParams({ account_id: state.accountId });
+      return `/api/v1/chat/events/${encodeURIComponent(message.event_id)}/download?${query}`;
+    }
+    return text(message?.media?.url);
+  }
+
+  function triggerMessageDownload(message) {
+    const url = messageDownloadUrl(message);
+    if (!url) return;
+    const link = document.createElement("a");
+    link.href = url;
+    link.rel = "noopener noreferrer";
+    if (message?.kind === "file") link.download = text(message.media?.filename);
+    if (!url.startsWith("/")) link.target = "_blank";
+    document.body.append(link);
+    link.click();
+    link.remove();
+  }
+
   function addFileCard(container, message) {
     const media = message.media || {};
-    const card = media.url ? document.createElement("a") : document.createElement("span");
+    const downloadUrl = messageDownloadUrl(message);
+    const card = downloadUrl ? document.createElement("a") : document.createElement("span");
     card.className = "zchat-file-card";
-    if (media.url) {
-      card.href = media.url;
-      card.target = "_blank";
+    if (downloadUrl) {
+      card.href = downloadUrl;
+      card.download = text(media.filename);
+      if (!downloadUrl.startsWith("/")) card.target = "_blank";
       card.rel = "noopener noreferrer";
     }
     const filename = text(media.filename) || "Tệp đính kèm";
@@ -2627,10 +2992,10 @@
     const detail = document.createElement("small");
     detail.textContent = [text(media.mime_type), formatBytes(media.size)]
       .filter(Boolean)
-      .join(" · ") || (media.url ? "Mở hoặc tải tệp" : "Chưa có liên kết tải");
+      .join(" · ") || (downloadUrl ? "Tải tệp" : "Chưa có liên kết tải");
     const download = document.createElement("span");
     download.className = "zchat-file-download";
-    download.textContent = media.url ? "↓" : "—";
+    download.textContent = downloadUrl ? "↓" : "—";
     copy.append(name, detail);
     card.append(icon, copy, download);
     container.append(card);
@@ -2740,11 +3105,15 @@
       bubble.classList.add("has-media");
       const video = document.createElement("video");
       video.className = "zchat-media-video";
-      video.src = media.url;
       video.controls = true;
-      video.preload = "metadata";
+      video.preload = "none";
       video.referrerPolicy = "no-referrer";
       if (media.thumbnail_url) video.poster = media.thumbnail_url;
+      applyMediaDimensions(video, media);
+      observeDeferredMedia(video, media.url, {
+        kind: "video",
+        poster: media.thumbnail_url || "",
+      });
       bubble.append(video);
       addMediaCaption(bubble, message);
       return;
@@ -2779,7 +3148,12 @@
       addInfoCard(bubble, message, message.kind);
       return;
     }
-    bubble.textContent = message.text;
+    bubble.classList.add("has-text");
+    if (chatText?.appendLinkedText) {
+      chatText.appendLinkedText(bubble, message.text);
+    } else {
+      bubble.textContent = message.text;
+    }
   }
 
   function renderQuotedMessage(bubble, message) {
@@ -2809,7 +3183,9 @@
       button.className = reaction.mine ? "mine" : "";
       button.title = `${reaction.label || "Reaction"} · ${reaction.count || 1}`;
       button.dataset.reactionId = reaction.reaction_id;
+      button.disabled = !accountIsReady();
       const glyph = document.createElement("span");
+      if (reaction.reaction_id === "ok") glyph.className = "zchat-reaction-wordmark";
       glyph.textContent = reaction.glyph || "✨";
       const count = document.createElement("b");
       count.textContent = String(reaction.count || 1);
@@ -2847,7 +3223,7 @@
   function renderMessageActions(message) {
     const actions = document.createElement("div");
     actions.className = "zchat-message-actions";
-    const unavailable = !message.event_id || message.undone;
+    const unavailable = !message.event_id || message.undone || !accountIsReady();
     actions.append(
       messageActionButton("Thả reaction", "☺", "reaction", message, unavailable),
       messageActionButton("Trả lời", "↩", "reply", message, unavailable),
@@ -2857,9 +3233,9 @@
     return actions;
   }
 
-  function renderMessage(message) {
+  function renderMessage(message, { animate = false } = {}) {
     const row = document.createElement("div");
-    row.className = `zchat-message${message.mine ? " mine" : ""}${message.status === "failed" ? " failed" : ""}`;
+    row.className = `zchat-message${message.mine ? " mine" : ""}${message.status === "failed" ? " failed" : ""}${animate ? " is-new" : ""}`;
     if (message.job_id) row.dataset.jobId = message.job_id;
     row.dataset.messageId = message.id;
     if (message.event_id) row.dataset.eventId = String(message.event_id);
@@ -2924,6 +3300,126 @@
     state.bottomSettleTimers = [];
   }
 
+  function suppressNativeMessageAnchoring() {
+    if (state.scrollAnchorReleaseFrame !== null) {
+      window.cancelAnimationFrame(state.scrollAnchorReleaseFrame);
+      state.scrollAnchorReleaseFrame = null;
+    }
+    messagesNode.classList.add("is-positioning");
+  }
+
+  function releaseNativeMessageAnchoring() {
+    if (state.scrollAnchorReleaseFrame !== null) {
+      window.cancelAnimationFrame(state.scrollAnchorReleaseFrame);
+    }
+    state.scrollAnchorReleaseFrame = window.requestAnimationFrame(() => {
+      state.scrollAnchorReleaseFrame = null;
+      if (!messageNavigationActive()) {
+        messagesNode.classList.remove("is-positioning");
+      }
+    });
+  }
+
+  function messageNavigationActive() {
+    return Boolean(
+      state.messageNavigation
+      && state.messageNavigation.threadId === state.activeThread?.thread_id,
+    );
+  }
+
+  function cancelMessageNavigation() {
+    const navigation = state.messageNavigation;
+    if (navigation?.frameId != null) {
+      window.cancelAnimationFrame(navigation.frameId);
+    }
+    if (navigation?.settleTimer != null) {
+      window.clearTimeout(navigation.settleTimer);
+    }
+    state.messageNavigation = null;
+    state.historyLoadBlockedUntil = 0;
+    releaseNativeMessageAnchoring();
+  }
+
+  function beginMessageNavigation(eventId) {
+    cancelMessageNavigation();
+    stopFollowingLatest();
+    suppressNativeMessageAnchoring();
+    const navigation = {
+      id: ++state.messageNavigationSequence,
+      threadId: state.activeThread?.thread_id || "",
+      eventId: String(eventId || ""),
+      frameId: null,
+      settleTimer: null,
+    };
+    state.messageNavigation = navigation;
+    return navigation;
+  }
+
+  function matchingMessageNavigation(eventId) {
+    const navigation = state.messageNavigation;
+    if (
+      navigation
+      && navigation.threadId === state.activeThread?.thread_id
+      && navigation.eventId === String(eventId || "")
+    ) {
+      return navigation;
+    }
+    return null;
+  }
+
+  function messageEventTarget(eventId) {
+    return messagesNode.querySelector(
+      `[data-event-id="${CSS.escape(String(eventId || ""))}"]`,
+    );
+  }
+
+  function navigateToMessageEvent(
+    eventId,
+    { behavior = "smooth", block = "start" } = {},
+  ) {
+    let navigation = matchingMessageNavigation(eventId);
+    if (!navigation) navigation = beginMessageNavigation(eventId);
+    if (navigation.frameId !== null) {
+      window.cancelAnimationFrame(navigation.frameId);
+    }
+    if (navigation.settleTimer !== null) {
+      window.clearTimeout(navigation.settleTimer);
+    }
+    const navigationId = navigation.id;
+    navigation.frameId = window.requestAnimationFrame(() => {
+      const current = state.messageNavigation;
+      if (!current || current.id !== navigationId) return;
+      current.frameId = null;
+      const target = messageEventTarget(eventId);
+      if (!target) {
+        cancelMessageNavigation();
+        return;
+      }
+      target.scrollIntoView({ behavior, block });
+      state.lastMessageScrollTop = messagesNode.scrollTop;
+      current.settleTimer = window.setTimeout(() => {
+        const pending = state.messageNavigation;
+        if (!pending || pending.id !== navigationId) return;
+        pending.settleTimer = null;
+        const settledTarget = messageEventTarget(eventId);
+        if (!settledTarget) {
+          cancelMessageNavigation();
+          return;
+        }
+        // Media and content-visibility can alter row heights after the first
+        // scroll. One final non-animated alignment makes the target stable.
+        settledTarget.scrollIntoView({ behavior: "auto", block });
+        state.lastMessageScrollTop = messagesNode.scrollTop;
+        state.messageNavigation = null;
+        state.historyLoadBlockedUntil = Date.now() + 180;
+        state.followLatest = false;
+        releaseNativeMessageAnchoring();
+        updateLatestJump();
+      }, behavior === "smooth" ? 560 : 120);
+    });
+    return true;
+  }
+
   function settleMessagesAtBottom() {
     if (!state.followLatest) return;
     messagesNode.scrollTop = messagesNode.scrollHeight;
@@ -2935,9 +3431,7 @@
     for (const timerId of state.bottomSettleTimers) {
       window.clearTimeout(timerId);
     }
-    state.bottomSettleTimers = [250, 750, 1500, 3000].map((delay) => (
-      window.setTimeout(settleMessagesAtBottom, delay)
-    ));
+    state.bottomSettleTimers = [];
     requestAnimationFrame(settleMessagesAtBottom);
     for (const media of messagesNode.querySelectorAll("img, video")) {
       if (media instanceof HTMLImageElement && media.complete) continue;
@@ -2961,6 +3455,7 @@
   }
 
   function restoreScrollAnchor(anchor) {
+    suppressNativeMessageAnchoring();
     const row = anchor?.messageId
       ? messagesNode.querySelector(
         `[data-message-id="${CSS.escape(anchor.messageId)}"]`,
@@ -2971,6 +3466,8 @@
         top: Math.min(anchor?.scrollTop || 0, messagesNode.scrollHeight),
         behavior: "auto",
       });
+      state.lastMessageScrollTop = messagesNode.scrollTop;
+      releaseNativeMessageAnchoring();
       return;
     }
     const containerTop = messagesNode.getBoundingClientRect().top;
@@ -2979,9 +3476,12 @@
       top: messagesNode.scrollTop + offsetNow - anchor.offset,
       behavior: "auto",
     });
+    state.lastMessageScrollTop = messagesNode.scrollTop;
+    releaseNativeMessageAnchoring();
   }
 
   function scrollMessages({ behavior = "smooth" } = {}) {
+    cancelMessageNavigation();
     state.followLatest = true;
     if (behavior === "auto") {
       messagesNode.scrollTop = messagesNode.scrollHeight;
@@ -3057,6 +3557,22 @@
     });
   }
 
+  function scheduleMessageScrollWork() {
+    if (state.messageScrollFrame !== null) return;
+    state.messageScrollFrame = window.requestAnimationFrame(() => {
+      state.messageScrollFrame = null;
+      const currentScrollTop = messagesNode.scrollTop;
+      const scrollingUp = currentScrollTop < state.lastMessageScrollTop - 1;
+      const navigating = messageNavigationActive()
+        || Date.now() < state.historyLoadBlockedUntil;
+      state.lastMessageScrollTop = currentScrollTop;
+      if (!navigating && isNearMessagesBottom()) state.followLatest = true;
+      if (scrollingUp && !navigating) scheduleUnreadViewportCheck();
+      if (currentScrollTop <= 90 && !navigating) void loadOlderMessages();
+      updateLatestJump();
+    });
+  }
+
   function updateLatestJump() {
     latestJump.hidden = !(
       state.activeThread &&
@@ -3085,6 +3601,7 @@
   ) {
     state.messages = messages;
     if (!messages.length) {
+      if (mode === "unread") cancelMessageNavigation();
       stopFollowingLatest();
       const empty = document.createElement("div");
       empty.className = "zchat-empty";
@@ -3095,6 +3612,7 @@
       const copy = document.createElement("p");
       copy.textContent = "Tin nhắn mới sẽ xuất hiện tự động khi Listener nhận được.";
       empty.append(icon, title, copy);
+      cleanupDeferredMedia(messagesNode);
       messagesNode.replaceChildren(empty);
       updateUnreadJump();
       updateLatestJump();
@@ -3111,19 +3629,20 @@
       }
       nodes.push(renderMessage(message));
     }
+    if (mode === "preserve") suppressNativeMessageAnchoring();
+    if (mode === "unread" && !matchingMessageNavigation(firstUnreadEventId)) {
+      beginMessageNavigation(firstUnreadEventId);
+    }
+    cleanupDeferredMedia(messagesNode);
     messagesNode.replaceChildren(...nodes);
 
     if (mode === "preserve") {
       stopFollowingLatest();
       restoreScrollAnchor(anchor);
     } else if (mode === "unread") {
-      stopFollowingLatest();
-      const target = messagesNode.querySelector(
-        `[data-event-id="${CSS.escape(String(firstUnreadEventId))}"]`,
-      );
-      requestAnimationFrame(() => {
-        target?.scrollIntoView({ behavior: "smooth", block: "start" });
-        updateLatestJump();
+      navigateToMessageEvent(firstUnreadEventId, {
+        behavior: "auto",
+        block: "start",
       });
     } else if (mode === "target") {
       const target = messagesNode.querySelector(
@@ -3145,7 +3664,9 @@
     updateLatestJump();
   }
 
-  async function loadMessages({ mode = "latest", aroundEventId = null } = {}) {
+  async function loadMessages(
+    { mode = "latest", aroundEventId = null, navigationId = null } = {},
+  ) {
     if (!state.accountId || !state.activeThread) return;
     const requestId = ++state.messageRequestId;
     const threadId = state.activeThread.thread_id;
@@ -3156,7 +3677,7 @@
         : "";
       const messages = await api(
         `/api/v1/chat/messages?account_id=${encodeURIComponent(state.accountId)}` +
-        `&thread_id=${encodeURIComponent(threadId)}&limit=300${around}`,
+        `&thread_id=${encodeURIComponent(threadId)}&limit=${MESSAGE_PAGE_SIZE}${around}`,
       );
       if (
         requestId !== state.messageRequestId ||
@@ -3164,8 +3685,19 @@
       ) {
         return;
       }
+      if (
+        mode === "unread"
+        && navigationId !== null
+        && state.messageNavigation?.id !== navigationId
+      ) {
+        return;
+      }
+      if (mode === "preserve" && !aroundEventId && state.messages.length) {
+        mergeIncrementalMessages(messages);
+        return;
+      }
       state.messagePagination = {
-        hasOlder: messages.length >= 300 && Boolean(oldestEventId(messages)),
+        hasOlder: messages.length >= MESSAGE_PAGE_SIZE && Boolean(oldestEventId(messages)),
         nextCursor: oldestEventId(messages),
         loading: false,
       };
@@ -3183,6 +3715,12 @@
       });
       void syncMissingMessageProfiles(messages);
     } catch (error) {
+      if (
+        mode === "unread"
+        && (navigationId === null || state.messageNavigation?.id === navigationId)
+      ) {
+        cancelMessageNavigation();
+      }
       toast(error.message, "error");
     } finally {
       messagesNode.removeAttribute("aria-busy");
@@ -3195,19 +3733,20 @@
       !state.activeThread ||
       !state.messagePagination.hasOlder ||
       state.messagePagination.loading ||
-      !state.messagePagination.nextCursor
+      !state.messagePagination.nextCursor ||
+      messageNavigationActive() ||
+      Date.now() < state.historyLoadBlockedUntil
     ) {
       return;
     }
     const requestId = state.messageRequestId;
     const threadId = state.activeThread.thread_id;
-    const anchor = captureScrollAnchor();
     const cursor = state.messagePagination.nextCursor;
     state.messagePagination.loading = true;
     try {
       const older = await api(
         `/api/v1/chat/messages?account_id=${encodeURIComponent(state.accountId)}` +
-        `&thread_id=${encodeURIComponent(threadId)}&limit=300` +
+        `&thread_id=${encodeURIComponent(threadId)}&limit=${MESSAGE_PAGE_SIZE}` +
         `&before_event_id=${encodeURIComponent(cursor)}`,
       );
       if (
@@ -3216,6 +3755,16 @@
       ) {
         return;
       }
+      if (
+        messageNavigationActive()
+        || Date.now() < state.historyLoadBlockedUntil
+      ) {
+        state.messagePagination.loading = false;
+        return;
+      }
+      // Capture at response time. The reader may have moved while the API was
+      // pending, and a request-time anchor must not overwrite that newer intent.
+      const anchor = captureScrollAnchor();
       const existing = new Set(state.messages.map((message) => String(message.id)));
       const uniqueOlder = older.filter((message) => !existing.has(String(message.id)));
       const merged = [...uniqueOlder, ...state.messages].sort(
@@ -3223,7 +3772,7 @@
       );
       const nextCursor = oldestEventId(uniqueOlder);
       state.messagePagination = {
-        hasOlder: older.length >= 300 && Boolean(nextCursor),
+        hasOlder: older.length >= MESSAGE_PAGE_SIZE && Boolean(nextCursor),
         nextCursor: nextCursor || cursor,
         loading: false,
       };
@@ -3295,6 +3844,25 @@
         .toLocaleLowerCase("vi")
         .includes(term)
     ));
+  }
+
+  function renderGroupMemberWindow() {
+    if (!groupMembersList) return;
+    const members = visibleGroupMembers();
+    if (!members.length) {
+      const empty = document.createElement("div");
+      empty.className = "zchat-group-members-empty";
+      empty.textContent = state.groupMembersSearch
+        ? "Không tìm thấy thành viên phù hợp."
+        : state.groupInfo?.last_sync_at
+          ? "Zalo chưa trả về danh sách thành viên."
+          : "Chưa có dữ liệu thành viên. Hãy đồng bộ nhóm.";
+      groupMembersList.replaceChildren(empty);
+      return;
+    }
+    groupMembersList.replaceChildren(
+      ...virtualFixedNodes(groupMembersList, members, renderGroupMember, 58),
+    );
   }
 
   function currentGroupName() {
@@ -3827,27 +4395,16 @@
     if (group.member_count) {
       $("#chat-detail-members").textContent = group.member_count;
     }
-    if (!members.length) {
-      const empty = document.createElement("div");
-      empty.className = "zchat-group-members-empty";
-      empty.textContent = state.groupMembersSearch
-        ? "Không tìm thấy thành viên phù hợp."
-        : result?.last_sync_at
-          ? "Zalo chưa trả về danh sách thành viên."
-          : "Chưa có dữ liệu thành viên. Hãy đồng bộ nhóm.";
-      groupMembersList?.replaceChildren(empty);
-    } else {
-      groupMembersList?.replaceChildren(...members.map(renderGroupMember));
-    }
+    renderGroupMemberWindow();
 
     const job = result?.job;
     const syncing = job?.status === "queued" || job?.status === "running";
     if (groupMembersSync) {
-      groupMembersSync.disabled = !state.canSend || syncing;
+      groupMembersSync.disabled = !state.canSend || !accountIsReady() || syncing;
       groupMembersSync.textContent = syncing ? "Đang đồng bộ…" : "Đồng bộ";
-      groupMembersSync.title = state.canSend
+      groupMembersSync.title = state.canSend && accountIsReady()
         ? "Lấy lại thông tin và danh sách thành viên từ Zalo"
-        : "Tài khoản hiện tại chỉ có quyền xem";
+        : "Tài khoản và Listener phải online";
     }
     if (groupManageOpen) {
       groupManageOpen.disabled = !state.canManageGroups || !accountIsReady() || syncing;
@@ -4435,7 +4992,7 @@
     };
     $$('[data-friend-action]').forEach((button) => {
       button.hidden = !visibility[button.dataset.friendAction];
-      button.disabled = Boolean(pending);
+      button.disabled = Boolean(pending) || !accountIsReady();
     });
     if (friendRequestMessageRow) {
       friendRequestMessageRow.hidden = !visibility.send_request;
@@ -4494,7 +5051,12 @@
 
   async function submitFriendAction(action, confirmation = null, confirmed = false) {
     const item = state.activeThread;
-    if (!item || item.thread_type !== "user" || !state.accountId) return;
+    if (
+      !item
+      || item.thread_type !== "user"
+      || !state.accountId
+      || !accountIsReady()
+    ) return;
     try {
       const result = await api(
         `/api/v1/chat/friends/${encodeURIComponent(item.thread_id)}/actions`,
@@ -4529,7 +5091,8 @@
     if (!friendDangerSubmit) return;
     const expected = state.activeThread?.name || "";
     const valid = text(friendDangerConfirmation?.value) === expected
-      && Boolean(friendDangerCheck?.checked);
+      && Boolean(friendDangerCheck?.checked)
+      && accountIsReady();
     friendDangerSubmit.disabled = !valid;
     if (friendDangerStatus) {
       friendDangerStatus.textContent = valid
@@ -4601,6 +5164,7 @@
 
   function clearActiveThread() {
     state.messageRequestId += 1;
+    cancelMessageNavigation();
     if (state.unreadViewportFrame !== null) {
       window.cancelAnimationFrame(state.unreadViewportFrame);
       state.unreadViewportFrame = null;
@@ -4689,6 +5253,7 @@
       scrollMessages({ behavior: "auto" });
       return;
     }
+    cancelMessageNavigation();
     const previous = state.activeThread;
     const previousAccountId = state.accountId;
     clearAttachments();
@@ -4724,14 +5289,163 @@
     await loadMessages({ mode: "latest" });
   }
 
-  function appendRealtimeMessage(message) {
-    if (!state.activeThread || message.thread_id !== state.activeThread.thread_id) return;
+  function latestMessageEventId() {
+    return state.messages.reduce(
+      (latest, message) => Math.max(latest, Number(message.event_id) || 0),
+      0,
+    );
+  }
+
+  function messageRenderFingerprint(message) {
+    return JSON.stringify([
+      message.status,
+      message.text,
+      message.kind,
+      message.author_name,
+      message.author_avatar_url,
+      message.media,
+      message.quote,
+      message.reactions,
+      message.forwarded,
+      message.undone,
+      message.error,
+    ]);
+  }
+
+  function removeRenderedMessage(message) {
+    const row = messagesNode.querySelector(
+      `[data-message-id="${CSS.escape(String(message.id))}"]`,
+    );
+    if (!row) return;
+    cleanupDeferredMedia(row);
+    row.remove();
+  }
+
+  function insertRenderedMessage(message, { animate = true } = {}) {
+    const index = state.messages.findIndex((item) => String(item.id) === String(message.id));
+    const node = renderMessage(message, { animate });
+    let nextNode = null;
+    for (let cursor = index + 1; cursor < state.messages.length; cursor += 1) {
+      nextNode = messagesNode.querySelector(
+        `[data-message-id="${CSS.escape(String(state.messages[cursor].id))}"]`,
+      );
+      if (nextNode) break;
+    }
+    if (nextNode) messagesNode.insertBefore(node, nextNode);
+    else messagesNode.append(node);
+  }
+
+  function matchingOptimisticEcho(message) {
+    if (!message.mine || !message.event_id) return null;
+    const createdAt = new Date(message.created_at).getTime();
+    return state.messages
+      .filter((candidate) => (
+        candidate.job_id &&
+        candidate.mine &&
+        candidate.kind === message.kind &&
+        candidate.text === message.text &&
+        Math.abs(new Date(candidate.created_at).getTime() - createdAt) < 5 * 60 * 1000
+      ))
+      .sort((left, right) => (
+        Math.abs(new Date(left.created_at).getTime() - createdAt) -
+        Math.abs(new Date(right.created_at).getTime() - createdAt)
+      ))[0] || null;
+  }
+
+  function mergeIncrementalMessages(messages) {
+    if (!Array.isArray(messages) || !messages.length) return 0;
+    const navigation = messageNavigationActive() ? state.messageNavigation : null;
+    const wasFollowing = !navigation && (state.followLatest || isNearMessagesBottom());
+    const anchor = !navigation && !wasFollowing ? captureScrollAnchor() : null;
+    const additions = [];
+    let changes = 0;
+
+    for (const incoming of messages) {
+      const existing = state.messages.find(
+        (message) => String(message.id) === String(incoming.id),
+      );
+      if (existing) {
+        const before = messageRenderFingerprint(existing);
+        Object.assign(existing, incoming);
+        if (before !== messageRenderFingerprint(existing)) {
+          replaceRenderedMessage(existing);
+          changes += 1;
+        }
+        continue;
+      }
+      const optimisticEcho = matchingOptimisticEcho(incoming);
+      if (optimisticEcho) {
+        removeRenderedMessage(optimisticEcho);
+        state.messages = state.messages.filter((item) => item !== optimisticEcho);
+      }
+      state.messages.push(incoming);
+      additions.push(incoming);
+      changes += 1;
+    }
+
+    if (!changes) return 0;
+    state.messages.sort(
+      (left, right) => new Date(left.created_at) - new Date(right.created_at),
+    );
     const empty = $(".zchat-empty", messagesNode);
     if (empty) messagesNode.replaceChildren();
-    state.messages.push(message);
-    messagesNode.append(renderMessage(message));
-    void syncMissingMessageProfiles([message]);
-    scrollMessages();
+    for (const message of additions) insertRenderedMessage(message);
+    void syncMissingMessageProfiles(messages);
+    if (navigation) {
+      navigateToMessageEvent(navigation.eventId, {
+        behavior: "auto",
+        block: "start",
+      });
+    } else if (wasFollowing) scrollMessages({ behavior: "auto" });
+    else if (anchor) restoreScrollAnchor(anchor);
+    updateUnreadJump();
+    updateLatestJump();
+    return changes;
+  }
+
+  async function loadNewMessages(threadId) {
+    if (
+      !state.accountId ||
+      !state.activeThread ||
+      state.activeThread.thread_id !== threadId
+    ) return;
+    if (state.messageIncrementalRunning) {
+      state.messageIncrementalQueuedThread = threadId;
+      return;
+    }
+    const cursor = latestMessageEventId();
+    if (!cursor) {
+      scheduleMessageReload(threadId);
+      return;
+    }
+    const accountId = state.accountId;
+    state.messageIncrementalRunning = true;
+    try {
+      const messages = await api(
+        `/api/v1/chat/messages?account_id=${encodeURIComponent(accountId)}` +
+        `&thread_id=${encodeURIComponent(threadId)}` +
+        `&after_event_id=${encodeURIComponent(cursor)}&limit=120`,
+      );
+      if (
+        state.accountId !== accountId ||
+        state.activeThread?.thread_id !== threadId
+      ) return;
+      mergeIncrementalMessages(messages);
+      if (messages.length >= 120) state.messageIncrementalQueuedThread = threadId;
+    } catch (error) {
+      console.warn("Không thể đồng bộ tin nhắn gia tăng", error);
+      scheduleMessageReload(threadId);
+    } finally {
+      state.messageIncrementalRunning = false;
+      const queuedThread = state.messageIncrementalQueuedThread;
+      state.messageIncrementalQueuedThread = "";
+      if (queuedThread) scheduleIncrementalMessageReload(queuedThread);
+    }
+  }
+
+  function appendRealtimeMessage(message) {
+    if (!state.activeThread || message.thread_id !== state.activeThread.thread_id) return;
+    mergeIncrementalMessages([message]);
   }
 
   function scheduleConversationReload() {
@@ -4751,6 +5465,46 @@
     );
   }
 
+  function scheduleIncrementalMessageReload(threadId) {
+    if (!state.activeThread || state.activeThread.thread_id !== threadId) return;
+    window.clearTimeout(state.messageIncrementalTimer);
+    state.messageIncrementalTimer = window.setTimeout(
+      () => loadNewMessages(threadId),
+      80,
+    );
+  }
+
+  function scheduleRealtimeRecovery(delay = 5000) {
+    window.clearTimeout(state.realtimeRecoveryTimer);
+    state.realtimeRecoveryTimer = window.setTimeout(
+      () => void reconcileRealtime(),
+      delay,
+    );
+  }
+
+  async function reconcileRealtime() {
+    if (document.visibilityState === "hidden") return;
+    if (!state.accountId) {
+      scheduleRealtimeRecovery(5000);
+      return;
+    }
+    if (state.realtimeRecoveryRunning) return;
+    state.realtimeRecoveryRunning = true;
+    try {
+      await loadConversations({ preserveSelection: true });
+      const threadId = state.activeThread?.thread_id;
+      if (threadId) {
+        if (latestMessageEventId()) await loadNewMessages(threadId);
+        else await loadMessages({ mode: "preserve" });
+      }
+    } catch (error) {
+      console.warn("Không thể khôi phục đồng bộ realtime", error);
+    } finally {
+      state.realtimeRecoveryRunning = false;
+      scheduleRealtimeRecovery(5000);
+    }
+  }
+
   async function changeAccount() {
     const currentNavigation = state.nav;
     const previous = state.activeThread;
@@ -4759,6 +5513,11 @@
       void markConversationRead(previous, previousAccountId);
     }
     state.accountId = accountSelect?.value || "";
+    rememberSelectedAccount();
+    state.conversations = state.conversationCache.get(state.accountId) || [];
+    state.conversationsAccountId = state.accountId;
+    window.clearTimeout(state.messageIncrementalTimer);
+    state.messageIncrementalQueuedThread = "";
     window.clearTimeout(state.contactsPollTimer);
     window.clearTimeout(state.tasksPollTimer);
     state.contacts = [];
@@ -4787,6 +5546,7 @@
     state.activeThread = null;
     updateAccountStatus();
     clearActiveThread();
+    renderConversations();
     setNavigation(currentNavigation);
     await loadConversations({ preserveSelection: false });
   }
@@ -4816,19 +5576,21 @@
   async function loadReactionCatalog() {
     try {
       state.reactionCatalog = await api("/api/v1/chat/reactions/catalog");
+      syncAutomationReactionsFromCatalog(state.reactionCatalog);
       renderReactionManager();
     } catch (error) {
       toast(`Không thể tải thư viện reaction: ${error.message}`, "error");
     }
   }
 
-  function reactionButton(item, message, { compact = false } = {}) {
+  function reactionButton(item, { compact = false } = {}) {
     const button = document.createElement("button");
     button.type = "button";
     button.className = compact ? "compact" : "";
     button.title = `${item.label}${item.mode === "local" ? " · Chỉ ZChat" : ""}`;
     button.dataset.reactionId = item.id;
     const glyph = document.createElement("span");
+    if (item.id === "ok") glyph.className = "zchat-reaction-wordmark";
     glyph.textContent = item.glyph;
     button.append(glyph);
     if (!compact) {
@@ -4836,26 +5598,30 @@
       label.textContent = item.label;
       button.append(label);
     }
-    button.addEventListener("click", () => {
-      void submitReaction(message, item.id);
-      hideFloatingMenus();
-    });
     return button;
   }
 
-  function renderReactionPicker(message) {
-    reactionQuick.replaceChildren();
-    reactionAll.replaceChildren();
+  function renderReactionPicker() {
     const enabled = state.reactionCatalog.filter((item) => item.enabled);
     const quick = enabled
       .filter((item) => item.quick)
       .slice(0, MAX_QUICK_REACTIONS);
     const quickIds = new Set(quick.map((item) => item.id));
+    const remaining = enabled.filter((candidate) => !quickIds.has(candidate.id));
+    const signature = JSON.stringify([
+      quick.map((item) => [item.id, item.glyph, item.label, item.mode]),
+      remaining.map((item) => [item.id, item.glyph, item.label, item.mode]),
+      state.canManageReactions,
+    ]);
+    if (signature === state.reactionPickerSignature) return;
+    state.reactionPickerSignature = signature;
+    reactionQuick.replaceChildren();
+    reactionAll.replaceChildren();
     for (const item of quick) {
-      reactionQuick.append(reactionButton(item, message, { compact: true }));
+      reactionQuick.append(reactionButton(item, { compact: true }));
     }
-    for (const item of enabled.filter((candidate) => !quickIds.has(candidate.id))) {
-      reactionAll.append(reactionButton(item, message));
+    for (const item of remaining) {
+      reactionAll.append(reactionButton(item));
     }
     reactionMore.hidden = reactionAll.childElementCount === 0;
     reactionManageOpen.hidden = !state.canManageReactions;
@@ -4869,7 +5635,7 @@
     state.reactionTarget = message;
     state.reactionAnchor = anchor;
     messageMenu.hidden = true;
-    renderReactionPicker(message);
+    renderReactionPicker();
     positionFloating(reactionPicker, anchor);
   }
 
@@ -4877,7 +5643,10 @@
     const row = messagesNode.querySelector(
       `[data-message-id="${CSS.escape(String(message.id))}"]`,
     );
-    if (row) row.replaceWith(renderMessage(message));
+    if (row) {
+      cleanupDeferredMedia(row);
+      row.replaceWith(renderMessage(message));
+    }
   }
 
   function applyReactionOptimistic(message, reactionId, remove) {
@@ -4951,7 +5720,7 @@
   }
 
   function beginReply(message) {
-    if (!message?.event_id || message.undone) return;
+    if (!message?.event_id || message.undone || !accountIsReady()) return;
     state.replyTarget = message;
     updateReplyPreview();
     draft.focus();
@@ -5061,7 +5830,7 @@
   }
 
   function openForwardDialog(message) {
-    if (!message?.event_id || message.undone) return;
+    if (!message?.event_id || message.undone || !accountIsReady()) return;
     state.forwardTarget = message;
     state.forwardSelection.clear();
     $("#chat-forward-search").value = "";
@@ -5072,7 +5841,7 @@
   }
 
   async function submitForward() {
-    if (!state.forwardTarget || !state.forwardSelection.size) return;
+    if (!state.forwardTarget || !state.forwardSelection.size || !accountIsReady()) return;
     const button = $("#chat-forward-submit");
     button.disabled = true;
     try {
@@ -5103,8 +5872,13 @@
     reactionPicker.hidden = true;
     const download = $("[data-message-menu-action='download']", messageMenu);
     const undo = $("[data-message-menu-action='undo']", messageMenu);
-    download.hidden = !message.media?.url;
-    undo.hidden = !(message.mine && message.event_id && !message.undone);
+    download.hidden = !messageDownloadUrl(message);
+    undo.hidden = !(
+      message.mine
+      && message.event_id
+      && !message.undone
+      && accountIsReady()
+    );
     positionFloating(messageMenu, anchor);
   }
 
@@ -5142,7 +5916,7 @@
   }
 
   async function undoMessage(message) {
-    if (!message?.mine || !message.event_id || message.undone) return;
+    if (!message?.mine || !message.event_id || message.undone || !accountIsReady()) return;
     if (!window.confirm("Thu hồi tin nhắn này trên Zalo? Thao tác không thể hoàn tác.")) return;
     try {
       await api("/api/v1/chat/undo", {
@@ -5170,6 +5944,7 @@
       row.className = "zchat-catalog-item";
       const glyph = document.createElement("span");
       glyph.className = "glyph";
+      if (item.id === "ok") glyph.classList.add("zchat-reaction-wordmark");
       glyph.textContent = item.glyph;
       const copy = document.createElement("span");
       const name = document.createElement("strong");
@@ -5288,6 +6063,7 @@
         body: JSON.stringify({ items: state.reactionManagerDraft }),
       });
       state.reactionCatalog = items;
+      syncAutomationReactionsFromCatalog(items);
       state.reactionManagerDraft = items.map((item) => ({ ...item }));
       renderReactionManager();
       $("#chat-reaction-manager-status").textContent = "Đã lưu thư viện reaction.";
@@ -5476,10 +6252,12 @@
     stream.onopen = () => {
       note.classList.remove("disconnected");
       note.lastChild.textContent = " Realtime qua SSE · gửi qua PostgreSQL job queue";
+      scheduleRealtimeRecovery(0);
     };
     stream.onerror = () => {
       note.classList.add("disconnected");
       note.lastChild.textContent = " SSE đang kết nối lại…";
+      scheduleRealtimeRecovery(1500);
     };
     stream.addEventListener("message.received", (event) => {
       const envelope = JSON.parse(event.data);
@@ -5496,7 +6274,7 @@
         scheduleConversationReload();
         return;
       }
-      scheduleMessageReload(threadId);
+      scheduleIncrementalMessageReload(threadId);
       scheduleConversationReload();
     });
     stream.addEventListener("chat.reaction.local", (event) => {
@@ -5755,6 +6533,7 @@
   $$("[data-chat-filter]").forEach((button) => {
     button.addEventListener("click", () => {
       state.filter = button.dataset.chatFilter;
+      conversationList.scrollTop = 0;
       $$("[data-chat-filter]").forEach((item) => {
         const active = item === button;
         item.classList.toggle("active", active);
@@ -5781,10 +6560,12 @@
   $("#chat-refresh")?.addEventListener("click", () => loadConversations());
   $("#chat-search")?.addEventListener("input", (event) => {
     state.search = event.target.value;
+    conversationList.scrollTop = 0;
     renderConversations();
   });
   contactsSearch?.addEventListener("input", (event) => {
     state.contactsSearch = event.target.value;
+    contactsList.scrollTop = 0;
     renderContacts();
   });
   contactsRefresh?.addEventListener("click", () => {
@@ -5818,6 +6599,7 @@
   });
   groupMembersSearch?.addEventListener("input", (event) => {
     state.groupMembersSearch = event.target.value;
+    if (groupMembersList) groupMembersList.scrollTop = 0;
     renderGroupInfo();
   });
   groupMembersSync?.addEventListener("click", () => {
@@ -5885,18 +6667,32 @@
     stopFollowingLatest();
     updateUnreadJump();
     void markConversationRead(state.activeThread);
-    const target = messagesNode.querySelector(
-      `[data-event-id="${CSS.escape(String(review.firstEventId))}"]`,
-    );
+    const navigation = beginMessageNavigation(review.firstEventId);
+    const target = messageEventTarget(review.firstEventId);
     if (target) {
-      target.scrollIntoView({ behavior: "smooth", block: "start" });
+      navigateToMessageEvent(review.firstEventId, {
+        behavior: "smooth",
+        block: "start",
+      });
       return;
     }
     await loadMessages({
       mode: "unread",
       aroundEventId: review.firstEventId,
+      navigationId: navigation.id,
     });
   });
+  messagesNode?.addEventListener("wheel", cancelMessageNavigation, { passive: true });
+  messagesNode?.addEventListener("touchstart", cancelMessageNavigation, { passive: true });
+  messagesNode?.addEventListener("pointerdown", cancelMessageNavigation, { passive: true });
+  for (const reactionList of [reactionQuick, reactionAll]) {
+    reactionList?.addEventListener("click", (event) => {
+      const button = event.target.closest("[data-reaction-id]");
+      if (!button || !state.reactionTarget) return;
+      void submitReaction(state.reactionTarget, button.dataset.reactionId);
+      hideFloatingMenus();
+    });
+  }
   reactionMore?.addEventListener("click", (event) => {
     event.stopPropagation();
     reactionAll.hidden = !reactionAll.hidden;
@@ -5925,9 +6721,7 @@
     const action = button.dataset.messageMenuAction;
     hideFloatingMenus();
     if (action === "copy") void copyMessage(message);
-    if (action === "download" && message.media?.url) {
-      window.open(message.media.url, "_blank", "noopener,noreferrer");
-    }
+    if (action === "download") triggerMessageDownload(message);
     if (action === "details") openMessageDetails(message);
     if (action === "undo") void undoMessage(message);
   });
@@ -5946,6 +6740,26 @@
     }
   });
   window.addEventListener("resize", hideFloatingMenus);
+  conversationList?.addEventListener(
+    "scroll",
+    () => scheduleFixedListRender("conversations"),
+    { passive: true },
+  );
+  contactsList?.addEventListener(
+    "scroll",
+    () => scheduleFixedListRender("contacts"),
+    { passive: true },
+  );
+  groupMembersList?.addEventListener(
+    "scroll",
+    () => scheduleFixedListRender("groupMembers"),
+    { passive: true },
+  );
+  richContactList?.addEventListener(
+    "scroll",
+    () => scheduleFixedListRender("richContacts"),
+    { passive: true },
+  );
   messagesNode?.addEventListener("click", (event) => {
     const row = event.target.closest(".zchat-message");
     if (!row || event.target.closest("button, a, input")) return;
@@ -5954,21 +6768,7 @@
     });
     row.classList.toggle("actions-visible");
   });
-  messagesNode?.addEventListener("scroll", () => {
-    const currentScrollTop = messagesNode.scrollTop;
-    const scrollingUp = currentScrollTop < state.lastMessageScrollTop - 1;
-    state.lastMessageScrollTop = currentScrollTop;
-    if (isNearMessagesBottom()) {
-      state.followLatest = true;
-    }
-    if (scrollingUp) {
-      scheduleUnreadViewportCheck();
-    }
-    if (messagesNode.scrollTop <= 90) {
-      void loadOlderMessages();
-    }
-    updateLatestJump();
-  }, { passive: true });
+  messagesNode?.addEventListener("scroll", scheduleMessageScrollWork, { passive: true });
   for (const eventName of ["wheel", "touchstart", "pointerdown"]) {
     messagesNode?.addEventListener(eventName, stopFollowingLatest, { passive: true });
   }
@@ -5983,7 +6783,10 @@
   });
   document.addEventListener("visibilitychange", () => {
     if (document.visibilityState === "hidden") {
+      window.clearTimeout(state.realtimeRecoveryTimer);
       persistActiveConversationRead();
+    } else {
+      scheduleRealtimeRecovery(0);
     }
   });
   window.addEventListener("pagehide", persistActiveConversationRead);
@@ -6049,6 +6852,7 @@
   }
   richContactSearch?.addEventListener("input", (event) => {
     state.richContactSearch = event.target.value;
+    if (richContactList) richContactList.scrollTop = 0;
     renderRichContacts();
   });
   richSend?.addEventListener("click", () => void sendRichContent());
@@ -6105,8 +6909,10 @@
   });
   composer?.addEventListener("submit", sendMessage);
 
+  restoreSelectedAccount();
   updateAccountStatus();
   loadReactionCatalog();
-  changeAccount();
+  void changeAccount();
   connectEvents();
+  scheduleRealtimeRecovery(5000);
 })();

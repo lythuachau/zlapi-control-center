@@ -161,14 +161,14 @@ def _safe_reaction(config: dict) -> dict | None:
     glyph = _text(value.get("glyph"))
     label = _text(value.get("label"))
     zalo_icon = _text(value.get("zalo_icon"))
+    mode = _text(value.get("mode")).casefold()
     if (
         not reaction_id
         or len(reaction_id) > 40
         or not glyph
         or not label
         or not zalo_icon
-        or value.get("mode") != "native"
-        or value.get("verified") is not True
+        or mode not in {"native", "experimental"}
     ):
         return None
     return {
@@ -178,8 +178,8 @@ def _safe_reaction(config: dict) -> dict | None:
         "zalo_icon": zalo_icon[:40],
         "r_type": _bounded_int(value.get("r_type"), 3, 0, 10_000),
         "source": _bounded_int(value.get("source"), 6, 0, 100),
-        "mode": "native",
-        "verified": True,
+        "mode": mode,
+        "verified": value.get("verified") is True,
     }
 
 

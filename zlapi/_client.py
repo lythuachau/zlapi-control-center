@@ -32,7 +32,9 @@ class ZaloAPI(object):
 		self._state = _state.State()
 		self._condition = threading.Event()
 		self._listening = False
-		self._start_fix = False
+		self._ws_lock = threading.Lock()
+		self._active_ws = None
+		self._listen_stop = threading.Event()
 		
 		if auto_login:
 			if (
@@ -3345,6 +3347,81 @@ class ZaloAPI(object):
 			User.fromDict(uploadData, None)
 		)
 	
+	def _fileServiceUrl(self):
+		service_map = self._state._config.get("zpw_service_map_v3") or self._state._config.get("zpw_service_map") or {}
+		file_services = service_map.get("file") if isinstance(service_map, dict) else None
+		if isinstance(file_services, list) and file_services:
+			base_url = str(file_services[0]).strip().rstrip("/")
+		elif isinstance(file_services, str):
+			base_url = file_services.strip().rstrip("/")
+		else:
+			base_url = "https://tt-files-wpa.chat.zalo.me"
+		if not base_url.startswith(("http://", "https://")):
+			base_url = "https://" + base_url
+		return base_url
+
+	def getGifUploadLimits(self):
+		"""Return GIF limits advertised by the current Zalo login session."""
+		settings = self._state._config.get("settings") or {}
+		gif_settings = settings.get("gif") if isinstance(settings, dict) else {}
+		share_settings = settings.get("sharefile") if isinstance(settings, dict) else {}
+		gif_settings = gif_settings if isinstance(gif_settings, dict) else {}
+		share_settings = share_settings if isinstance(share_settings, dict) else {}
+		try:
+			gif_max_bytes = int(gif_settings.get("max_gif_size") or 3072) * 1024
+		except (TypeError, ValueError):
+			gif_max_bytes = 3 * 1024 * 1024
+		try:
+			share_max_bytes = int(share_settings.get("max_size_gif") or 10) * 1024 * 1024
+		except (TypeError, ValueError):
+			share_max_bytes = 10 * 1024 * 1024
+		try:
+			max_width = int(gif_settings.get("max_width") or 640)
+			max_height = int(gif_settings.get("max_height") or 480)
+		except (TypeError, ValueError):
+			max_width, max_height = 640, 480
+		return {
+			"max_bytes": min(gif_max_bytes, share_max_bytes),
+			"max_width": max(1, max_width),
+			"max_height": max(1, max_height),
+		}
+
+	def _uploadGifThumbnail(self, gifContent):
+		params = {
+			"zpw_ver": 645,
+			"zpw_type": 30,
+		}
+		files = {
+			"fileContent": ("blob", gifContent, "image/png"),
+		}
+		response = self._post(
+			f"{self._fileServiceUrl()}/api/message/upthumb",
+			params=params,
+			files=files,
+		)
+		data = response.json()
+		if data.get("error_code") != 0:
+			raise ZaloAPIException(
+				f"Error #{data.get('error_code')} when uploading GIF thumbnail: "
+				f"{data.get('error_message') or data.get('data')}"
+			)
+		results = data.get("data")
+		if isinstance(results, str):
+			results = self._decode(results)
+		if isinstance(results, str):
+			try:
+				results = json.loads(results)
+			except Exception:
+				results = {}
+		if isinstance(results, dict) and isinstance(results.get("data"), dict):
+			results = results["data"]
+		if not isinstance(results, dict):
+			raise ZaloAPIException("Zalo returned an invalid GIF thumbnail response")
+		thumbnail_url = results.get("url") or results.get("thumb") or results.get("thumbUrl")
+		if not thumbnail_url:
+			raise ZaloAPIException("Zalo did not return a GIF thumbnail URL")
+		return str(thumbnail_url)
+
 	def sendLocalGif(self, gifPath, thumbnailUrl, thread_id, thread_type, gifName="vrxx.gif", width=500, height=500, ttl=0):
 		"""Send Gif to a User/Group with local file.
 			
@@ -3367,14 +3444,34 @@ class ZaloAPI(object):
 		if not os.path.exists(gifPath):
 			raise ZaloUserError(f"{gifPath} not found")
 			
-		files = [("chunkContent", open(gifPath, "rb"))]
-		gifSize = len(open(gifPath, "rb").read())
-		gifName = gifName if gifName else gifPath if "/" not in gifPath else gifPath.rstrip("/")[1]
-		fileChecksum = hashlib.md5(open(gifPath, "rb").read()).hexdigest()
+		with open(gifPath, "rb") as gif_file:
+			gifContent = gif_file.read()
+		gifSize = len(gifContent)
+		limits = self.getGifUploadLimits()
+		if gifSize > limits["max_bytes"]:
+			raise ZaloUserError(
+				f"GIF is too large for this Zalo session ({gifSize} > {limits['max_bytes']} bytes)"
+			)
+		if int(width) > limits["max_width"] or int(height) > limits["max_height"]:
+			raise ZaloUserError(
+				f"GIF dimensions exceed this Zalo session ({width}x{height} > "
+				f"{limits['max_width']}x{limits['max_height']})"
+			)
+		files = {"chunkContent": (os.path.basename(gifPath), gifContent, "image/gif")}
+		gifName = gifName or os.path.basename(gifPath) or "sticker.gif"
+		fileChecksum = hashlib.md5(gifContent).hexdigest()
+		try:
+			zaloThumbnailUrl = self._uploadGifThumbnail(gifContent)
+		except Exception:
+			if isinstance(thumbnailUrl, str) and thumbnailUrl.startswith(("http://", "https://")):
+				zaloThumbnailUrl = thumbnailUrl
+			else:
+				raise
 		
 		params = {
 			"zpw_ver": 645,
 			"zpw_type": 30,
+			"nretry": 0,
 			"type": 1,
 			"params": {
 				"clientId": str(_util.now()),
@@ -3385,7 +3482,7 @@ class ZaloAPI(object):
 				"msg": "",
 				"type": 1,
 				"ttl": ttl,
-				"thumb": thumbnailUrl,
+				"thumb": zaloThumbnailUrl,
 				"checksum": fileChecksum,
 				"totalChunk": 1,
 				"chunkId": 1
@@ -3393,10 +3490,10 @@ class ZaloAPI(object):
 		}
 		
 		if thread_type == ThreadType.USER:
-			url = "https://tt-files-wpa.chat.zalo.me/api/message/gif"
+			url = f"{self._fileServiceUrl()}/api/message/gif"
 			params["params"]["toid"] = str(thread_id)
 		elif thread_type == ThreadType.GROUP:
-			url = "https://tt-files-wpa.chat.zalo.me/api/group/gif"
+			url = f"{self._fileServiceUrl()}/api/group/gif"
 			params["params"]["visibility"] = 0
 			params["params"]["grid"] = str(thread_id)
 		else:
@@ -4098,14 +4195,29 @@ class ZaloAPI(object):
 		finally:
 			self._listening = False
 	
-	def _fix_recv(self):
-		old_timestamp = int(time.time())
-		time.sleep(50 * 60)
-		self._start_fix = True
+	def _close_active_ws(self):
+		with self._ws_lock:
+			ws = self._active_ws
+			self._active_ws = None
+		if ws is not None:
+			try:
+				ws.close()
+			except Exception:
+				pass
+
+	def _fix_recv(self, connection_done, reconnect_requested):
+		if connection_done.wait(50 * 60):
+			return
+		if self._listen_stop.is_set():
+			return
+		reconnect_requested.set()
 		self._condition.set()
-	
-	def _listen_ws(self, thread=False, reconnect=5):
+		self._close_active_ws()
+
+	def _listen_ws_once(self, thread=False):
 		self._condition.clear()
+		if self._listen_stop.is_set():
+			return False
 		params = {"zpw_ver": 645, "zpw_type": 30, "t": _util.now()}
 		url = self._state._config["zpw_ws"][0] + "?" + urllib.parse.urlencode(params)
 		
@@ -4130,11 +4242,18 @@ class ZaloAPI(object):
 			"Cookie": raw_cookies
 		}
 		
-		with connect(url, additional_headers=headers) as ws:
-			pool.submit(self._fix_recv)
+		connection_done = threading.Event()
+		reconnect_requested = threading.Event()
+		ws = connect(url, additional_headers=headers)
+		try:
+			with self._ws_lock:
+				self._active_ws = ws
+			if self._listen_stop.is_set():
+				return False
+			pool.submit(self._fix_recv, connection_done, reconnect_requested)
 			self.onListening()
 			self._listening = True
-			while not self._condition.is_set():
+			while not self._condition.is_set() and not self._listen_stop.is_set():
 				try:
 					data = ws.recv()
 					if not isinstance(data, bytes):
@@ -4160,7 +4279,14 @@ class ZaloAPI(object):
 					parsedData = _util.zws_decode(parsed, self.ws_key)
 					if n == 1 and cmd == 3000 and s == 0:
 						logger.warning("Another connection is opened, closing this one")
-						ws.close()
+						self._condition.set()
+						self._listening = False
+						self.onErrorCallBack(
+							ZaloUserError(
+								"Zalo closed this listener because another Web connection is active"
+							)
+						)
+						break
 					
 					elif n == 1 and cmd == 501 and s == 0:
 						parsedData = _util.zws_decode(parsed, self.ws_key)
@@ -4246,51 +4372,62 @@ class ZaloAPI(object):
 				
 				except KeyboardInterrupt:
 					self._condition.set()
-					ws.close()
 					print("\x1b[1K")
 					logger.warning("Stop Listen Because KeyboardInterrupt Exception!")
-					pid = os.getpid()
-					os.kill(pid, signal.SIGTERM)
+					break
 				
 				except (websockets.ConnectionClosedOK, websockets.exceptions.ConnectionClosedOK):
 					self._condition.set()
-					ws.close()
 					break
 				
 				except (websockets.ConnectionClosedError, websockets.exceptions.ConnectionClosedError):
-					self._start_fix = True
+					if not self._condition.is_set() and not self._listen_stop.is_set():
+						reconnect_requested.set()
 					self._condition.set()
-					ws.close()
+					break
 				
 				except Exception as e:
-					if str(e) == "sent 1000 (OK); then received 1000 (OK) NORMAL_CLOSURE":
-						pass
+					if self._condition.is_set():
+						break
+					elif str(e) == "sent 1000 (OK); then received 1000 (OK) NORMAL_CLOSURE":
+						self._condition.set()
+						break
 					
 					else:
 						self._listening = False
-						self._start_fix = False
-						self._condition.set()
-						ws.close()
-						self.onErrorCallBack(e)
 						if self.run_forever:
-							while not self._listening:
-								try:
-									logger.debug("Run forever mode is enabled, trying to reconnect...")
-									self._listen_ws(thread, reconnect)
-								except:
-									pass
-								
-								time.sleep(reconnect)
+							reconnect_requested.set()
+						self._condition.set()
+						self.onErrorCallBack(e)
+						break
 				
 				finally:
 					self._listening = False
-		
-		if self._start_fix:
+
+		finally:
+			connection_done.set()
+			with self._ws_lock:
+				should_close = self._active_ws is ws
+				if should_close:
+					self._active_ws = None
+			if should_close:
+				try:
+					ws.close()
+				except Exception:
+					pass
+
+		return reconnect_requested.is_set()
+
+	def _listen_ws(self, thread=False, reconnect=5):
+		while not self._listen_stop.is_set():
+			should_reconnect = self._listen_ws_once(thread)
+			if not should_reconnect:
+				return
 			logger.debug("Reconnecting websocket because of interruption...")
-			self._start_fix = False
-			self._listen_ws(thread, reconnect)
-	
-	def startListening(self, delay=1, thread=False, type="websocket", reconnect=5):
+			if self._listen_stop.wait(max(0, reconnect)):
+				return
+
+	def startListening(self, delay=1, thread=False, type="websocket", reconnect=5, reset_stop=True):
 		"""Start listening from an external event loop.
 		
 		Args:
@@ -4298,10 +4435,13 @@ class ZaloAPI(object):
 			thread (bool): Handle messages within the thread (Default: False)
 			type (str): Type of listening (Default: websocket)
 			reconnect (int): Delay interval when reconnecting
+			reset_stop (bool): Clear a previous explicit stop before starting
 		
 		Raises:
 			ZaloAPIException: If request failed
 		"""
+		if reset_stop:
+			self._listen_stop.clear()
 		if str(type).lower() == "websocket":
 			
 			if self._state._config.get("zpw_ws"):
@@ -4321,9 +4461,11 @@ class ZaloAPI(object):
 		"""Stop the listening loop."""
 		self._listening = False
 		self.listening = False
+		self._listen_stop.set()
 		self._condition.set()
+		self._close_active_ws()
 	
-	def listen(self, delay=1, thread=False, type="websocket", run_forever=False, reconnect=5):
+	def listen(self, delay=1, thread=False, type="websocket", run_forever=False, reconnect=5, reset_stop=True):
 		"""Initialize and runs the listening loop continually.
 		
 		Args:
@@ -4331,9 +4473,10 @@ class ZaloAPI(object):
 			thread (bool): Handle messages within the thread (Default: False)
 			type (str): Type of listening (Default: websocket)
 			reconnect (int): Delay interval when reconnecting
+			reset_stop (bool): Clear a previous explicit stop before starting
 		"""
 		self.run_forever = run_forever
-		self.startListening(delay, thread, type, reconnect)
+		self.startListening(delay, thread, type, reconnect, reset_stop)
 		
 	"""
 	END LISTEN METHODS

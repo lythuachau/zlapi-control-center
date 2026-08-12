@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import logging
 import re
 import secrets
 import shutil
@@ -18,6 +19,8 @@ from fastapi.responses import StreamingResponse
 from sqlalchemy import desc, func, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
+
+from zlapi._exception import ZaloLoginError
 
 from .auth import (
     get_db,
@@ -44,6 +47,13 @@ from .chat import (
     message_text,
     outgoing_message,
 )
+from .connector import (
+    AccountIdentityConflictError,
+    AccountIdentityError,
+    AccountIdentityMismatchError,
+)
+from .history_sync import queue_history_sync
+from .inbound_files import InboundFileError, open_inbound_file, safe_inbound_filename
 from .media import (
     gif_library_media_url,
     infer_media_kind,
@@ -120,6 +130,8 @@ from .security import (
     verify_secret,
 )
 
+logger = logging.getLogger("zlapi.api")
+
 router = APIRouter(prefix="/api/v1")
 
 _GIPHY_ID_PATTERN = re.compile(r"^[A-Za-z0-9]{6,64}$")
@@ -133,6 +145,14 @@ def _require_chat_account(session: Session, account_id: str) -> ZaloAccount:
     if not account.enabled:
         raise HTTPException(status_code=409, detail="Zalo account is disabled")
     if account.status == "error":
+        if "another web connection is active" in (account.last_error or "").casefold():
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    "Listener bị ngắt bởi một kết nối Zalo Web khác; "
+                    "hãy đóng kết nối kia rồi bật lại listener."
+                ),
+            )
         raise HTTPException(
             status_code=409,
             detail="Phiên Zalo đang lỗi; admin phải cập nhật cookie trước khi gửi.",
@@ -176,6 +196,7 @@ def account_payload(account: ZaloAccount) -> dict:
         "circuit_failures": account.circuit_failures,
         "circuit_open_until": account.circuit_open_until,
         "has_credentials": bool(account.cookie_cipher and account.imei_cipher),
+        "identity_locked": bool(account.zalo_uid),
         "created_at": account.created_at,
         "updated_at": account.updated_at,
     }
@@ -502,7 +523,7 @@ def _mention_sticker_automation_payload(
         "reactions": [
             item
             for item in reaction_catalog(session)
-            if item["mode"] == "native" and item["verified"]
+            if item["mode"] in {"native", "experimental"}
         ],
     }
 
@@ -1276,7 +1297,8 @@ def create_account(
         cookie_cipher=request.app.state.secret_box.encrypt_json(body.cookies),
         imei_cipher=request.app.state.secret_box.encrypt_text(body.imei),
         user_agent=body.user_agent,
-        listener_enabled=body.listener_enabled,
+        # A listener may only start after a test has bound a verified Zalo UID.
+        listener_enabled=False,
     )
     session.add(account)
     try:
@@ -1291,7 +1313,7 @@ def create_account(
         action="account.create",
         resource_type="zalo_account",
         resource_id=account.id,
-        details={"name": account.name, "listener_enabled": account.listener_enabled},
+        details={"name": account.name, "listener_enabled": False},
         request=request,
     )
     return account_payload(account)
@@ -1310,23 +1332,129 @@ def update_account(
     if account is None:
         raise HTTPException(status_code=404, detail="Account not found")
     changes = body.model_dump(exclude_unset=True)
-    if "cookies" in changes:
-        account.cookie_cipher = request.app.state.secret_box.encrypt_json(changes.pop("cookies"))
-        account.status = "unchecked"
+    credential_fields = {"cookies", "imei"} & changes.keys()
+    identity_verified = False
+    if credential_fields:
+        candidate_cookies = changes.get("cookies")
+        if candidate_cookies is None:
+            candidate_cookies = request.app.state.secret_box.decrypt_json(
+                account.cookie_cipher
+            )
+        candidate_imei = changes.get("imei")
+        if candidate_imei is None:
+            candidate_imei = request.app.state.secret_box.decrypt_text(
+                account.imei_cipher
+            )
+        candidate_user_agent = changes.get("user_agent", account.user_agent)
+        try:
+            candidate_uid, _ = request.app.state.zalo_connector.probe_session(
+                cookies=candidate_cookies,
+                imei=candidate_imei,
+                user_agent=candidate_user_agent,
+            )
+            request.app.state.zalo_connector.validate_identity(
+                session,
+                account,
+                candidate_uid,
+            )
+        except (AccountIdentityMismatchError, AccountIdentityConflictError) as exc:
+            raise HTTPException(
+                status_code=409,
+                detail={"code": exc.code, "message": str(exc)},
+            ) from exc
+        except AccountIdentityError as exc:
+            raise HTTPException(
+                status_code=422,
+                detail={"code": exc.code, "message": str(exc)},
+            ) from exc
+        except ZaloLoginError as exc:
+            code_match = re.search(r"Error #(\d+)", str(exc))
+            zalo_code = code_match.group(1) if code_match else None
+            logger.warning(
+                "Zalo rejected candidate session for account %s (code=%s)",
+                account.id,
+                zalo_code or "unknown",
+            )
+            if zalo_code == "102":
+                code = "zalo_session_expired"
+                message = (
+                    "Zalo báo session key không hợp lệ hoặc đã hết hạn (mã 102). "
+                    "Hãy đăng nhập lại Zalo Web và lấy zpw_sek mới; nếu đổi thiết bị, "
+                    "hãy nhập IMEI tương ứng."
+                )
+            else:
+                code = "zalo_login_failed"
+                message = (
+                    "Zalo từ chối cookie/IMEI. Hãy lấy lại zpw_sek và IMEI từ "
+                    "cùng một phiên Zalo Web."
+                )
+            raise HTTPException(
+                status_code=422,
+                detail={"code": code, "message": message},
+            ) from exc
+        except Exception as exc:
+            logger.warning(
+                "Candidate session verification failed for account %s (type=%s)",
+                account.id,
+                type(exc).__name__,
+            )
+            raise HTTPException(
+                status_code=422,
+                detail={
+                    "code": "session_verification_failed",
+                    "message": (
+                        "Không thể xác minh cookie/IMEI mới. "
+                        "Phiên cũ và lịch sử vẫn được giữ nguyên."
+                    ),
+                },
+            ) from exc
+
+        account.cookie_cipher = request.app.state.secret_box.encrypt_json(
+            candidate_cookies
+        )
+        account.imei_cipher = request.app.state.secret_box.encrypt_text(candidate_imei)
+        account.zalo_uid = candidate_uid
+        account.status = "online"
+        account.last_seen_at = utcnow()
         account.last_error = None
         account.listener_enabled = False
         account.circuit_failures = 0
         account.circuit_open_until = None
-    if "imei" in changes:
-        account.imei_cipher = request.app.state.secret_box.encrypt_text(changes.pop("imei"))
-        account.status = "unchecked"
-        account.last_error = None
-        account.listener_enabled = False
-        account.circuit_failures = 0
-        account.circuit_open_until = None
+        changes.pop("cookies", None)
+        changes.pop("imei", None)
+        identity_verified = True
     for key, value in changes.items():
         setattr(account, key, value)
-    session.commit()
+    history_sync_job = None
+    if identity_verified:
+        history_sync_job = queue_history_sync(
+            session,
+            account_id=account.id,
+            reason="session_updated",
+            created_by_id=principal.id if principal.kind == "user" else None,
+        )
+    try:
+        session.commit()
+    except IntegrityError as exc:
+        session.rollback()
+        if "name" in body.model_fields_set:
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "code": "account_name_conflict",
+                    "message": "Tên tài khoản quản lý này đã tồn tại.",
+                },
+            ) from exc
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "session_identity_conflict",
+                "message": (
+                    "UID Zalo này đã thuộc một tài khoản quản lý khác. "
+                    "Không có dữ liệu phiên nào được thay đổi."
+                ),
+            },
+        ) from exc
     write_audit(
         session,
         principal=principal,
@@ -1336,7 +1464,14 @@ def update_account(
         details={"fields": sorted(body.model_fields_set)},
         request=request,
     )
-    return account_payload(account)
+    response = account_payload(account)
+    if identity_verified:
+        response.update(
+            identity_verified=True,
+            history_preserved=True,
+            history_sync_job_id=history_sync_job.id if history_sync_job else None,
+        )
+    return response
 
 
 @router.delete("/accounts/{account_id}")
@@ -1461,6 +1596,14 @@ def set_listener_state(
         raise HTTPException(status_code=404, detail="Account not found")
     if enabled and not account.enabled:
         raise HTTPException(status_code=409, detail="Enable the account before starting its listener")
+    if enabled and (not account.zalo_uid or account.status != "online"):
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "Hãy kiểm tra hoặc cập nhật phiên để xác minh đúng Zalo UID "
+                "trước khi bật listener. Lịch sử hiện có vẫn được giữ nguyên."
+            ),
+        )
     account.listener_enabled = enabled
     session.commit()
     write_audit(
@@ -2016,14 +2159,10 @@ def update_chat_mention_sticker_automation(
         }
     else:
         reaction = reaction_by_id(session, body.reaction_id or "")
-        if (
-            reaction is None
-            or reaction["mode"] != "native"
-            or not reaction["verified"]
-        ):
+        if reaction is None or reaction["mode"] not in {"native", "experimental"}:
             raise HTTPException(
                 status_code=422,
-                detail="Reaction này chưa được xác nhận là gửi được trên Zalo",
+                detail="Reaction này chỉ dùng trong ZChat, không thể gửi tự động lên Zalo",
             )
     config = {
         "group_ids": body.group_ids,
@@ -2972,14 +3111,19 @@ def list_chat_messages(
     thread_id: str = Query(min_length=1, max_length=100),
     around_event_id: int | None = Query(default=None, ge=1),
     before_event_id: int | None = Query(default=None, ge=1),
+    after_event_id: int | None = Query(default=None, ge=1),
     session: Session = Depends(get_db),
     principal: Principal = Depends(require_scope("read")),
     limit: int = Query(default=200, ge=1, le=500),
 ) -> list[dict]:
-    if around_event_id is not None and before_event_id is not None:
+    cursor_count = sum(
+        cursor is not None
+        for cursor in (around_event_id, before_event_id, after_event_id)
+    )
+    if cursor_count > 1:
         raise HTTPException(
             status_code=422,
-            detail="Chỉ được dùng một cursor: around_event_id hoặc before_event_id",
+            detail="Chỉ được dùng một cursor cho mỗi yêu cầu",
         )
     account = session.get(ZaloAccount, account_id)
     if account is None:
@@ -2990,8 +3134,59 @@ def list_chat_messages(
         selected_thread_id=thread_id,
         around_event_id=around_event_id,
         before_event_id=before_event_id,
+        after_event_id=after_event_id,
         user_id=principal.id if principal.kind == "user" else None,
         limit=limit,
+    )
+
+
+@router.get("/chat/events/{event_id}/download")
+def download_received_chat_file(
+    event_id: int,
+    account_id: str,
+    request: Request,
+    session: Session = Depends(get_db),
+    principal: Principal = Depends(require_scope("read")),
+) -> StreamingResponse:
+    event = _chat_source_event(
+        session,
+        account_id=account_id,
+        event_id=event_id,
+    )
+    kind, media = message_media(event.payload or {})
+    if kind != "file" or not isinstance(media, dict):
+        raise HTTPException(status_code=404, detail="Tin nhắn không chứa tệp tải xuống")
+    source_url = str(media.get("url") or "")
+    if not source_url:
+        raise HTTPException(status_code=410, detail="Tin nhắn không còn liên kết tải tệp")
+    filename = safe_inbound_filename(str(media.get("filename") or "tep-dinh-kem"))
+    max_bytes = request.app.state.settings.inbound_download_max_mb * 1024 * 1024
+    try:
+        opened = open_inbound_file(
+            source_url,
+            filename=filename,
+            range_header=request.headers.get("range"),
+            max_bytes=max_bytes,
+        )
+    except InboundFileError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
+    write_audit(
+        session,
+        principal=principal,
+        action="chat.file.download",
+        resource_type="event",
+        resource_id=str(event.id),
+        details={
+            "account_id": account_id,
+            "thread_id": event.thread_id,
+            "extension": str(media.get("extension") or Path(filename).suffix.lstrip("."))[:16],
+        },
+        request=request,
+    )
+    return StreamingResponse(
+        opened.chunks(),
+        status_code=opened.status_code,
+        headers=opened.headers,
     )
 
 
@@ -3775,15 +3970,39 @@ async def event_stream(
     request: Request,
     _: Principal = Depends(require_short_lived_scope("read")),
 ) -> StreamingResponse:
+    raw_last_event_id = request.headers.get("last-event-id") or request.query_params.get(
+        "last_event_id", "0"
+    )
+    try:
+        last_event_id = max(0, int(raw_last_event_id))
+    except (TypeError, ValueError):
+        last_event_id = 0
+
     async def generate():
         broker = request.app.state.event_broker
         queue = broker.add_subscriber()
+        cursor = last_event_id
         try:
+            if cursor:
+                while True:
+                    replay = await asyncio.to_thread(broker.fetch_since, cursor)
+                    for event in replay:
+                        cursor = max(cursor, int(event["id"]))
+                        yield (
+                            f"id: {event['id']}\nevent: {event['event_type']}\n"
+                            f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
+                        )
+                    if len(replay) < 500:
+                        break
             while True:
                 if await request.is_disconnected():
                     break
                 try:
                     event = await asyncio.wait_for(queue.get(), timeout=15)
+                    event_id = int(event["id"])
+                    if event_id <= cursor:
+                        continue
+                    cursor = event_id
                     yield f"id: {event['id']}\nevent: {event['event_type']}\ndata: {json.dumps(event, ensure_ascii=False)}\n\n"
                 except TimeoutError:
                     yield ": keepalive\n\n"
