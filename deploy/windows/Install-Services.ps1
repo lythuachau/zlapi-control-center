@@ -6,12 +6,17 @@ param(
     [string]$DataRoot = "C:\ZlapiData",
     [string]$SourceRoot = (Resolve-Path (Join-Path $PSScriptRoot "..\..")).Path,
     [string]$WinSWVersion = "v2.12.0",
-    [string]$ExistingCaddyConfig = ""
+    [string]$ExistingCaddyConfig = "",
+    [switch]$ConfirmLegacyAllInOne
 )
 
 $ErrorActionPreference = "Stop"
 Set-StrictMode -Version Latest
 . (Join-Path $PSScriptRoot "Service-ProcessHelpers.ps1")
+
+if (-not $ConfirmLegacyAllInOne) {
+    throw "This legacy all-in-one installer downloads tools, changes firewall/Caddy, installs tasks and starts listeners. Use the staged Prepare-* scripts, or pass -ConfirmLegacyAllInOne after an approved maintenance window."
+}
 
 function Assert-NativeSuccess([string]$Step) {
     if ($LASTEXITCODE -ne 0) {

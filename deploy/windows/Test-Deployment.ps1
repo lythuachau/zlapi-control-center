@@ -101,8 +101,8 @@ $checks.LocalHealth = $localHealth.status
 $publicHealth = Wait-ZlapiReady -Uri "https://$Domain/health/ready"
 $checks.PublicHealth = $publicHealth.status
 
-$task = Get-ScheduledTask -TaskName "ZLAPI Control Maintenance"
-$checks.MaintenanceTask = $task.State.ToString()
+$task = Get-ScheduledTask -TaskName "ZLAPI Control Maintenance" -ErrorAction SilentlyContinue
+$checks.MaintenanceTask = if ($null -eq $task) { "Missing" } else { $task.State.ToString() }
 
 Push-Location $shared
 try {
@@ -113,7 +113,7 @@ finally {
 }
 
 $failed = $checks.GetEnumerator() | Where-Object {
-    $_.Value -in @($false, "Stopped", "Disabled", "StartPending", "StopPending")
+    $_.Value -in @($false, "Stopped", "Disabled", "Missing", "StartPending", "StopPending")
 }
 $checks | Format-Table -AutoSize
 if ($failed -or $processFailures.Count -gt 0) {

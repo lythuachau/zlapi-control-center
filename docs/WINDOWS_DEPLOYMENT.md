@@ -1,4 +1,4 @@
-# Triển khai ZLAPI Control Center trên Windows Server 2025
+# Triển khai ZLAPI Control Center trên Windows x64
 
 Hệ thống chạy trực tiếp bằng Windows Service. Không cần Docker, WSL, VM, Redis hoặc PostgreSQL cục bộ.
 
@@ -31,7 +31,10 @@ Lưu mật khẩu administrator được in đúng một lần. Sau đó tạo r
 .\deploy\windows\Install-Services.ps1 -Domain "control.example.com"
 ```
 
-Script thứ hai cài bốn Windows Service, mở firewall 80/443, đăng ký maintenance task, kiểm tra health và xóa bootstrap password khỏi `.env`.
+`Install-Services.ps1` là installer all-in-one cũ: nó tải tool, thay đổi
+firewall/Caddy, đăng ký task và khởi động listener. Script hiện từ chối chạy nếu
+không có `-ConfirmLegacyAllInOne`. Với production, ưu tiên quy trình staged trong
+`docs/RESTORE.md` để từng thay đổi được kiểm tra và duyệt riêng.
 
 Truy cập `https://control.example.com`, đăng nhập rồi đổi mật khẩu bootstrap bằng API/UI quản trị.
 
@@ -89,8 +92,10 @@ Tổng connection budget mặc định dưới 10:
 
 - Web: pool 3, overflow 1.
 - Worker: pool 2, overflow 1.
-- Listener: pool 1, không overflow.
+- Listener: pool 1, không overflow (serialize checkout bằng lock giữa supervisor + callback thread).
 - Migration/maintenance: tối đa 2.
+
+Lỗi `QueuePool limit of size 1 overflow 0 reached, connection timed out` trên listener nghĩa là hai thread cùng checkout session. Code listener phải đi qua `listener_db_session()` (có RLock); không gọi `session_factory()` trực tiếp từ callback.
 
 Theo dõi `/api/v1/health`. Khi database đạt 70% của 1 GB hoặc latency p95 vượt 150 ms, nâng gói Aiven hoặc chuyển PostgreSQL bằng `pg_dump/pg_restore`.
 
@@ -151,6 +156,12 @@ Script từ chối ghi đè key đã tồn tại. Trước khi service đọc ke
 khoản service ZLAPI có quyền cần thiết. Sau khi xác minh backup/database test,
 xóa envelope và certificate migration. Không xóa key/blob gốc trên VPS cũ cho
 đến khi hết thời gian rollback.
+
+Quy trình trên cần VPS cũ còn hoạt động. Để chịu được tình huống VPS cũ mất hoàn
+toàn, chuẩn bị trước recovery PFX ngoại tuyến bằng
+`New-OfflineRecoveryCertificate.ps1`, xuất envelope với public `.cer`, và kiểm
+tra `Test-OfflineKeyRecovery.ps1`. Chi tiết tại `docs/RESTORE.md`. Không lưu PFX
+hoặc mật khẩu PFX trong GitHub hay trên VPS.
 
 ## Kiểm tra vận hành
 
