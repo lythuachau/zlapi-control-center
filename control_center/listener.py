@@ -4,11 +4,15 @@ import hashlib
 import logging
 import signal
 import threading
+from collections.abc import Generator
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import timedelta
 
 from sqlalchemy import desc, select
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy.exc import IntegrityError, SQLAlchemyError
+from sqlalchemy.exc import TimeoutError as SATimeoutError
+from sqlalchemy.orm import Session
 
 from zlapi import ThreadType, ZaloAPI
 
@@ -25,6 +29,20 @@ from .security import SecretBox
 logger = logging.getLogger("zlapi.listener")
 PROFILE_SYNC_BATCH_SIZE = 100
 PROFILE_SYNC_COALESCE_SECONDS = 2
+DATABASE_RETRY_INITIAL_SECONDS = 5.0
+DATABASE_RETRY_MAX_SECONDS = 60.0
+
+# Serialize DB checkouts across supervisor + per-account callback threads.
+# Listener is intentionally budgeted at pool_size=1; concurrent session_factory()
+# without this lock raises QueuePool "size 1 overflow 0" timeouts.
+_LISTENER_DB_LOCK = threading.RLock()
+
+
+@contextmanager
+def listener_db_session(database: Database) -> Generator[Session, None, None]:
+    with _LISTENER_DB_LOCK:
+        with database.session_factory() as session:
+            yield session
 
 
 def listener_event_dedupe_key(
@@ -144,7 +162,7 @@ def store_listener_event(
         normalized_thread_id,
         normalized_payload,
     )
-    with database.session_factory() as session:
+    with listener_db_session(database) as session:
         if dedupe_key:
             existing = session.scalar(
                 select(Event.id).where(
@@ -212,7 +230,7 @@ def store_listener_event(
     # Another callback may have inserted the same event between the lookup and
     # commit. Keep the listener healthy and still refresh the account heartbeat.
     if update_account_heartbeat:
-        with database.session_factory() as session:
+        with listener_db_session(database) as session:
             _mark_account_online(session, account_id)
             session.commit()
     return False
@@ -229,7 +247,7 @@ def record_listener_failure(
     duplicate_connection = (
         "another web connection is active" in error_text.casefold()
     )
-    with database.session_factory() as session:
+    with listener_db_session(database) as session:
         account = session.get(ZaloAccount, account_id)
         if account:
             account.status = "error"
@@ -275,7 +293,7 @@ class ManagedZaloClient(ZaloAPI):
 
     def _queue_recent_history_sync(self) -> None:
         try:
-            with self.database.session_factory() as session:
+            with listener_db_session(self.database) as session:
                 queue_history_sync(
                     session,
                     account_id=self.managed_account_id,
@@ -291,7 +309,7 @@ class ManagedZaloClient(ZaloAPI):
 
     def _sync_group_metadata(self) -> None:
         cutoff = utcnow() - timedelta(hours=1)
-        with self.database.session_factory() as session:
+        with listener_db_session(self.database) as session:
             recent_snapshot = session.scalar(
                 select(Event.id)
                 .where(
@@ -535,15 +553,47 @@ class ListenerSupervisor:
         self._stop_clients(clients)
 
     def run(self) -> None:
-        while not self.stop_event.is_set():
-            self.reconcile()
-            self.stop_event.wait(10)
-        self._cancel_all_handles()
-        self._join_handles()
-        self.database.dispose()
+        database_retry_delay = DATABASE_RETRY_INITIAL_SECONDS
+        try:
+            while not self.stop_event.is_set():
+                try:
+                    self.reconcile()
+                except SATimeoutError as exc:
+                    # Pool contention is not a dead engine; disposing would drop
+                    # connections still checked out by account callback threads.
+                    logger.warning(
+                        "Database pool busy (%s); retrying listener in %.1f seconds",
+                        type(exc).__name__,
+                        database_retry_delay,
+                    )
+                    self.stop_event.wait(database_retry_delay)
+                    database_retry_delay = min(
+                        DATABASE_RETRY_MAX_SECONDS,
+                        database_retry_delay * 2,
+                    )
+                    continue
+                except SQLAlchemyError as exc:
+                    self.database.dispose()
+                    logger.warning(
+                        "Database unavailable (%s); retrying listener in %.1f seconds",
+                        type(exc).__name__,
+                        database_retry_delay,
+                    )
+                    self.stop_event.wait(database_retry_delay)
+                    database_retry_delay = min(
+                        DATABASE_RETRY_MAX_SECONDS,
+                        database_retry_delay * 2,
+                    )
+                    continue
+                database_retry_delay = DATABASE_RETRY_INITIAL_SECONDS
+                self.stop_event.wait(10)
+        finally:
+            self._cancel_all_handles()
+            self._join_handles()
+            self.database.dispose()
 
     def reconcile(self) -> None:
-        with self.database.session_factory() as session:
+        with listener_db_session(self.database) as session:
             desired = {
                 account.id
                 for account in session.scalars(
@@ -579,7 +629,7 @@ class ListenerSupervisor:
         try:
             if self.stop_event.is_set() or cancel_event.is_set():
                 return
-            with self.database.session_factory() as session:
+            with listener_db_session(self.database) as session:
                 account = session.get(ZaloAccount, account_id)
                 if account is None:
                     return

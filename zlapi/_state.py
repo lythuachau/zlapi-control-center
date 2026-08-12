@@ -77,7 +77,13 @@ class State(object):
 				)
 				response.raise_for_status()
 				data = response.json()
-				login_data = data["data"]
+				login_data = data.get("data") if isinstance(data, dict) else None
+				if not isinstance(login_data, dict):
+					error = data.get("error_code") if isinstance(data, dict) else None
+					message = data.get("error_message") if isinstance(data, dict) else None
+					raise _exception.ZaloLoginError(
+						f"Error #{error} when logging in: {message or 'Session rejected'}"
+					)
 				zpw = login_data["zpw_ws"]
 				uid = login_data["uid"]
 				phone = login_data["phone_number"]

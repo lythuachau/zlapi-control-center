@@ -2,8 +2,12 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
+import pytest
+
 from control_center.catalog import catalog_payload
 from zlapi import MessageReaction
+from zlapi import _state as state_module
+from zlapi._exception import ZaloLoginError
 from zlapi._state import State
 
 
@@ -18,6 +22,30 @@ def test_zalo_states_do_not_share_mutable_headers():
     second = State()
     first._headers["User-Agent"] = "first-account"
     assert second._headers["User-Agent"] != "first-account"
+
+
+def test_zalo_login_preserves_rejected_session_error_code(monkeypatch):
+    class RejectedSessionResponse:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {
+                "data": None,
+                "error_code": 102,
+                "error_message": "The session key has reached its timeout",
+            }
+
+    monkeypatch.setattr(
+        state_module.requests,
+        "get",
+        lambda *_args, **_kwargs: RejectedSessionResponse(),
+    )
+    state = State()
+    state.set_cookies({"zpw_sek": "expired"})
+
+    with pytest.raises(ZaloLoginError, match=r"Error #102"):
+        state.login("cookie-session", "cookie-session", "test-imei")
 
 
 def test_catalog_preserves_array_and_object_defaults():

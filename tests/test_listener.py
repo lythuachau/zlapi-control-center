@@ -188,6 +188,43 @@ def test_listener_stores_each_message_identity_once(settings):
     database.dispose()
 
 
+def test_listener_db_session_serializes_concurrent_checkouts():
+    """Regression: concurrent callbacks must not checkout more than one session at once."""
+    import time
+
+    active = 0
+    peak = 0
+    barrier = threading.Barrier(6)
+    counter_lock = threading.Lock()
+
+    class FakeDatabase:
+        @contextmanager
+        def session_factory(self):
+            nonlocal active, peak
+            with counter_lock:
+                active += 1
+                peak = max(peak, active)
+            try:
+                time.sleep(0.03)
+                yield object()
+            finally:
+                with counter_lock:
+                    active -= 1
+
+    def worker() -> None:
+        barrier.wait()
+        with listener_module.listener_db_session(FakeDatabase()):
+            time.sleep(0.02)
+
+    threads = [threading.Thread(target=worker) for _ in range(6)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    assert peak == 1
+
+
 def test_listener_coalesces_group_authors_into_one_profile_job(settings):
     database = Database(settings)
     database.create_schema()

@@ -89,6 +89,8 @@
     reloadTimer: null,
     messageReloadTimer: null,
     messageIncrementalTimer: null,
+    realtimeRecoveryTimer: null,
+    realtimeRecoveryRunning: false,
     messageIncrementalRunning: false,
     messageIncrementalQueuedThread: "",
     messageRequestId: 0,
@@ -5472,6 +5474,37 @@
     );
   }
 
+  function scheduleRealtimeRecovery(delay = 5000) {
+    window.clearTimeout(state.realtimeRecoveryTimer);
+    state.realtimeRecoveryTimer = window.setTimeout(
+      () => void reconcileRealtime(),
+      delay,
+    );
+  }
+
+  async function reconcileRealtime() {
+    if (document.visibilityState === "hidden") return;
+    if (!state.accountId) {
+      scheduleRealtimeRecovery(5000);
+      return;
+    }
+    if (state.realtimeRecoveryRunning) return;
+    state.realtimeRecoveryRunning = true;
+    try {
+      await loadConversations({ preserveSelection: true });
+      const threadId = state.activeThread?.thread_id;
+      if (threadId) {
+        if (latestMessageEventId()) await loadNewMessages(threadId);
+        else await loadMessages({ mode: "preserve" });
+      }
+    } catch (error) {
+      console.warn("Không thể khôi phục đồng bộ realtime", error);
+    } finally {
+      state.realtimeRecoveryRunning = false;
+      scheduleRealtimeRecovery(5000);
+    }
+  }
+
   async function changeAccount() {
     const currentNavigation = state.nav;
     const previous = state.activeThread;
@@ -6219,10 +6252,12 @@
     stream.onopen = () => {
       note.classList.remove("disconnected");
       note.lastChild.textContent = " Realtime qua SSE · gửi qua PostgreSQL job queue";
+      scheduleRealtimeRecovery(0);
     };
     stream.onerror = () => {
       note.classList.add("disconnected");
       note.lastChild.textContent = " SSE đang kết nối lại…";
+      scheduleRealtimeRecovery(1500);
     };
     stream.addEventListener("message.received", (event) => {
       const envelope = JSON.parse(event.data);
@@ -6748,7 +6783,10 @@
   });
   document.addEventListener("visibilitychange", () => {
     if (document.visibilityState === "hidden") {
+      window.clearTimeout(state.realtimeRecoveryTimer);
       persistActiveConversationRead();
+    } else {
+      scheduleRealtimeRecovery(0);
     }
   });
   window.addEventListener("pagehide", persistActiveConversationRead);
@@ -6876,4 +6914,5 @@
   loadReactionCatalog();
   void changeAccount();
   connectEvents();
+  scheduleRealtimeRecovery(5000);
 })();

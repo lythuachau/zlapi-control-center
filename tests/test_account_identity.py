@@ -11,6 +11,7 @@ from control_center.connector import (
     AccountIdentityMismatchError,
 )
 from control_center.models import Event, ZaloAccount
+from zlapi._exception import ZaloLoginError
 
 from .conftest import login
 
@@ -261,6 +262,41 @@ def test_api_rejects_invalid_session_before_replacing_encrypted_credentials(
         assert account.cookie_cipher == old_cookie_cipher
         assert account.imei_cipher == old_imei_cipher
         assert event.account_id == account_id
+
+
+def test_api_reports_expired_zalo_session_without_replacing_credentials(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    csrf = login(client)
+    account_id, _ = _api_account_with_history(client, csrf)
+
+    with client.app.state.database.session_factory() as session:
+        before = session.get(ZaloAccount, account_id)
+        assert before is not None
+        old_cookie_cipher = before.cookie_cipher
+        old_imei_cipher = before.imei_cipher
+
+    def reject_probe(**_kwargs):
+        raise ZaloLoginError(
+            "Error #102 when logging in: The session key has reached its timeout"
+        )
+
+    monkeypatch.setattr(client.app.state.zalo_connector, "probe_session", reject_probe)
+    response = client.patch(
+        f"/api/v1/accounts/{account_id}",
+        headers={"X-CSRF-Token": csrf},
+        json={"cookies": {"zpw_sek": "expired-cookie"}},
+    )
+
+    assert response.status_code == 422
+    assert response.json()["detail"]["code"] == "zalo_session_expired"
+    assert "mã 102" in response.json()["detail"]["message"]
+    with client.app.state.database.session_factory() as session:
+        account = session.get(ZaloAccount, account_id)
+        assert account is not None
+        assert account.cookie_cipher == old_cookie_cipher
+        assert account.imei_cipher == old_imei_cipher
 
 
 def test_api_rotates_matching_session_in_place_and_preserves_history_link(

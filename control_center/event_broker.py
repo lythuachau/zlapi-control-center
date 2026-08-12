@@ -1,12 +1,19 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from collections.abc import AsyncIterator
 
 from sqlalchemy import func, select
+from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.exc import TimeoutError as SATimeoutError
 
 from .db import Database
 from .models import Event
+
+logger = logging.getLogger("zlapi.event_broker")
+DATABASE_RETRY_INITIAL_SECONDS = 1.0
+DATABASE_RETRY_MAX_SECONDS = 30.0
 
 
 class EventBroker:
@@ -31,9 +38,12 @@ class EventBroker:
             return int(session.scalar(select(func.max(Event.id))) or 0)
 
     def _fetch(self) -> list[dict]:
+        return self.fetch_since(self.cursor)
+
+    def fetch_since(self, cursor: int, limit: int = 500) -> list[dict]:
         with self.database.session_factory() as session:
             rows = session.scalars(
-                select(Event).where(Event.id > self.cursor).order_by(Event.id).limit(500)
+                select(Event).where(Event.id > cursor).order_by(Event.id).limit(limit)
             ).all()
             return [
                 {
@@ -48,8 +58,37 @@ class EventBroker:
             ]
 
     async def _tail(self) -> None:
+        retry_delay = DATABASE_RETRY_INITIAL_SECONDS
         while not self._stopping.is_set():
-            events = await asyncio.to_thread(self._fetch)
+            try:
+                events = await asyncio.to_thread(self._fetch)
+            except asyncio.CancelledError:
+                raise
+            except SATimeoutError as exc:
+                # Pool contention is transient and disposing here could close
+                # connections still in use by request handlers.
+                logger.warning(
+                    "Event broker database pool busy (%s); retrying in %.1f seconds",
+                    type(exc).__name__,
+                    retry_delay,
+                )
+                await self._wait_before_retry(retry_delay)
+                retry_delay = min(DATABASE_RETRY_MAX_SECONDS, retry_delay * 2)
+                continue
+            except SQLAlchemyError as exc:
+                # A broken/stale database connection must not terminate the
+                # broker task; the web process can continue serving reads while
+                # the broker reconnects and resumes from the same cursor.
+                self.database.dispose()
+                logger.warning(
+                    "Event broker database unavailable (%s); retrying in %.1f seconds",
+                    type(exc).__name__,
+                    retry_delay,
+                )
+                await self._wait_before_retry(retry_delay)
+                retry_delay = min(DATABASE_RETRY_MAX_SECONDS, retry_delay * 2)
+                continue
+            retry_delay = DATABASE_RETRY_INITIAL_SECONDS
             for event in events:
                 self.cursor = max(self.cursor, event["id"])
                 for queue in tuple(self.subscribers):
@@ -63,6 +102,12 @@ class EventBroker:
                 await asyncio.wait_for(self._stopping.wait(), timeout=1)
             except TimeoutError:
                 continue
+
+    async def _wait_before_retry(self, delay: float) -> None:
+        try:
+            await asyncio.wait_for(self._stopping.wait(), timeout=delay)
+        except TimeoutError:
+            pass
 
     async def subscribe(self) -> AsyncIterator[dict]:
         queue: asyncio.Queue = asyncio.Queue(maxsize=200)

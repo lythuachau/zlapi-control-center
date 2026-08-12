@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import logging
 import re
 import secrets
 import shutil
@@ -18,6 +19,8 @@ from fastapi.responses import StreamingResponse
 from sqlalchemy import desc, func, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
+
+from zlapi._exception import ZaloLoginError
 
 from .auth import (
     get_db,
@@ -126,6 +129,8 @@ from .security import (
     safe_child_path,
     verify_secret,
 )
+
+logger = logging.getLogger("zlapi.api")
 
 router = APIRouter(prefix="/api/v1")
 
@@ -1362,7 +1367,37 @@ def update_account(
                 status_code=422,
                 detail={"code": exc.code, "message": str(exc)},
             ) from exc
+        except ZaloLoginError as exc:
+            code_match = re.search(r"Error #(\d+)", str(exc))
+            zalo_code = code_match.group(1) if code_match else None
+            logger.warning(
+                "Zalo rejected candidate session for account %s (code=%s)",
+                account.id,
+                zalo_code or "unknown",
+            )
+            if zalo_code == "102":
+                code = "zalo_session_expired"
+                message = (
+                    "Zalo báo session key không hợp lệ hoặc đã hết hạn (mã 102). "
+                    "Hãy đăng nhập lại Zalo Web và lấy zpw_sek mới; nếu đổi thiết bị, "
+                    "hãy nhập IMEI tương ứng."
+                )
+            else:
+                code = "zalo_login_failed"
+                message = (
+                    "Zalo từ chối cookie/IMEI. Hãy lấy lại zpw_sek và IMEI từ "
+                    "cùng một phiên Zalo Web."
+                )
+            raise HTTPException(
+                status_code=422,
+                detail={"code": code, "message": message},
+            ) from exc
         except Exception as exc:
+            logger.warning(
+                "Candidate session verification failed for account %s (type=%s)",
+                account.id,
+                type(exc).__name__,
+            )
             raise HTTPException(
                 status_code=422,
                 detail={
@@ -3935,15 +3970,39 @@ async def event_stream(
     request: Request,
     _: Principal = Depends(require_short_lived_scope("read")),
 ) -> StreamingResponse:
+    raw_last_event_id = request.headers.get("last-event-id") or request.query_params.get(
+        "last_event_id", "0"
+    )
+    try:
+        last_event_id = max(0, int(raw_last_event_id))
+    except (TypeError, ValueError):
+        last_event_id = 0
+
     async def generate():
         broker = request.app.state.event_broker
         queue = broker.add_subscriber()
+        cursor = last_event_id
         try:
+            if cursor:
+                while True:
+                    replay = await asyncio.to_thread(broker.fetch_since, cursor)
+                    for event in replay:
+                        cursor = max(cursor, int(event["id"]))
+                        yield (
+                            f"id: {event['id']}\nevent: {event['event_type']}\n"
+                            f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
+                        )
+                    if len(replay) < 500:
+                        break
             while True:
                 if await request.is_disconnected():
                     break
                 try:
                     event = await asyncio.wait_for(queue.get(), timeout=15)
+                    event_id = int(event["id"])
+                    if event_id <= cursor:
+                        continue
+                    cursor = event_id
                     yield f"id: {event['id']}\nevent: {event['event_type']}\ndata: {json.dumps(event, ensure_ascii=False)}\n\n"
                 except TimeoutError:
                     yield ": keepalive\n\n"

@@ -7,6 +7,9 @@ import signal
 import socket
 import threading
 
+from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.exc import TimeoutError as SATimeoutError
+
 from .automations import mark_automation_run
 from .config import get_settings
 from .connector import UnsupportedActionError, ZaloConnector
@@ -20,6 +23,8 @@ from .queue import claim_job, complete_job, fail_job, recover_stale_jobs
 from .security import SecretBox
 
 logger = logging.getLogger("zlapi.worker")
+DATABASE_RETRY_INITIAL_SECONDS = 5.0
+DATABASE_RETRY_MAX_SECONDS = 60.0
 
 
 class Worker:
@@ -36,12 +41,48 @@ class Worker:
         self.stop_event.set()
 
     def run(self, once: bool = False) -> None:
-        with self.database.session_factory() as session:
-            recovered = recover_stale_jobs(session)
-            if recovered:
-                logger.warning("Recovered %s stale jobs", recovered)
+        recovered_stale_jobs = False
+        database_retry_delay = DATABASE_RETRY_INITIAL_SECONDS
         while not self.stop_event.is_set():
-            worked = self.run_once()
+            try:
+                if not recovered_stale_jobs:
+                    with self.database.session_factory() as session:
+                        recovered = recover_stale_jobs(session)
+                        if recovered:
+                            logger.warning("Recovered %s stale jobs", recovered)
+                    recovered_stale_jobs = True
+                worked = self.run_once()
+            except SATimeoutError as exc:
+                if once:
+                    raise
+                # Pool exhaustion is not a dead engine; keep existing connections.
+                logger.warning(
+                    "Database pool busy (%s); retrying worker in %.1f seconds",
+                    type(exc).__name__,
+                    database_retry_delay,
+                )
+                self.stop_event.wait(database_retry_delay)
+                database_retry_delay = min(
+                    DATABASE_RETRY_MAX_SECONDS,
+                    database_retry_delay * 2,
+                )
+                continue
+            except SQLAlchemyError as exc:
+                self.database.dispose()
+                if once:
+                    raise
+                logger.warning(
+                    "Database unavailable (%s); retrying worker in %.1f seconds",
+                    type(exc).__name__,
+                    database_retry_delay,
+                )
+                self.stop_event.wait(database_retry_delay)
+                database_retry_delay = min(
+                    DATABASE_RETRY_MAX_SECONDS,
+                    database_retry_delay * 2,
+                )
+                continue
+            database_retry_delay = DATABASE_RETRY_INITIAL_SECONDS
             if once:
                 return
             if worked:
