@@ -2350,6 +2350,8 @@
 
   function setNavigation(nav) {
     state.nav = ["contacts", "theme", "automation"].includes(nav) ? nav : "messages";
+    app.dataset.chatNav = state.nav;
+    app.dataset.threadOpen = "false";
     $$("[data-chat-nav]").forEach((item) => {
       const active = item.dataset.chatNav === state.nav;
       item.classList.toggle("active", active);
@@ -5173,6 +5175,7 @@
     dialogClose(richMediaDialog);
     clearRichDraft();
     state.activeThread = null;
+    app.dataset.threadOpen = "false";
     state.friendProfile = null;
     state.friendRequestId += 1;
     if (friendshipPanel) friendshipPanel.hidden = true;
@@ -5250,6 +5253,7 @@
 
   async function selectConversation(item) {
     if (state.activeThread?.thread_id === item.thread_id) {
+      app.dataset.threadOpen = "true";
       scrollMessages({ behavior: "auto" });
       return;
     }
@@ -5265,6 +5269,7 @@
     hideFloatingMenus();
     updateReplyPreview();
     state.activeThread = item;
+    app.dataset.threadOpen = "true";
     state.lastMessageScrollTop = 0;
     state.messagePagination = {
       hasOlder: false,

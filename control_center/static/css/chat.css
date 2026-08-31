@@ -5391,6 +5391,14 @@ button.zchat-poll-card {
     display: none;
   }
 
+  .zchat[data-thread-open="false"] .zchat-inbox {
+    display: flex;
+  }
+
+  .zchat[data-thread-open="false"] .zchat-thread {
+    display: none;
+  }
+
   .zchat-thread-header {
     padding: 10px 12px;
   }
