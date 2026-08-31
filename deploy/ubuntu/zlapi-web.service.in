@@ -1,0 +1,19 @@
+[Unit]
+Description=ZLAPI Control Center web service
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=@APP_USER@
+Group=@APP_GROUP@
+WorkingDirectory=@APP_DIR@
+EnvironmentFile=@ENV_FILE@
+ExecStart=@APP_DIR@/.venv/bin/uvicorn control_center.main:app --host 127.0.0.1 --port 8000
+Restart=on-failure
+RestartSec=5
+PrivateTmp=true
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target

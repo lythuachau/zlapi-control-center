@@ -1,0 +1,19 @@
+[Unit]
+Description=ZLAPI Control Center background worker
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=@APP_USER@
+Group=@APP_GROUP@
+WorkingDirectory=@APP_DIR@
+EnvironmentFile=@ENV_FILE@
+ExecStart=@APP_DIR@/.venv/bin/python -m control_center.worker
+Restart=on-failure
+RestartSec=5
+PrivateTmp=true
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target
