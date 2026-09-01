@@ -39,7 +39,7 @@ def test_disabled_account_history_remains_available_in_chat(client: TestClient):
 
     page = client.get("/chat")
     assert page.status_code == 200
-    assert "20260901-responsive-tabs-1" in page.text
+    assert "20260901-shared-stickers-1" in page.text
     assert "Tài khoản mất kết nối · chỉ đọc" in page.text
     assert 'data-enabled="false"' in page.text
     assert (

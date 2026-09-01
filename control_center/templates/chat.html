@@ -834,7 +834,7 @@
                   <span>Loại</span>
                   <input id="chat-sticker-type" type="number" min="0" max="100" value="1">
                 </label>
-                <button type="button" id="chat-sticker-use-manual">Xem trước</button>
+                <button type="button" id="chat-sticker-use-manual">Thêm vào thư viện</button>
               </div>
             </details>
           </div>
@@ -1039,5 +1039,5 @@
 
 {% block scripts %}
   <script defer src="{{ url_for('static', path='/js/chat-text.js') }}?v=20260731-unread-scroll-1"></script>
-  <script defer src="{{ url_for('static', path='/js/chat.js') }}?v=20260901-responsive-tabs-1"></script>
+  <script defer src="{{ url_for('static', path='/js/chat.js') }}?v=20260901-shared-stickers-1"></script>
 {% endblock %}

@@ -1159,7 +1159,7 @@
     }
   }
 
-  function useManualSticker() {
+  async function useManualSticker() {
     const sticker = normalizedSticker({
       sticker_id: $("#chat-sticker-id")?.value,
       category_id: $("#chat-sticker-category")?.value,
@@ -1172,7 +1172,18 @@
     if (!state.stickerCatalog.some((item) => stickerKey(item) === sticker.key)) {
       state.stickerCatalog.unshift(sticker);
     }
+    state.stickerFavoriteKeys.add(sticker.key);
     selectSticker(sticker);
+    try {
+      const result = await saveStickerFavorites();
+      applyStickerCatalog(result);
+      toast("Đã thêm sticker vào thư viện dùng chung.");
+    } catch (error) {
+      state.stickerFavoriteKeys.delete(sticker.key);
+      renderStickerCatalog();
+      renderAutomationStickers();
+      toast(error.message, "error");
+    }
   }
 
   function normalizedGif(item) {
@@ -2053,7 +2064,7 @@
       const name = document.createElement("strong");
       name.textContent = "Chưa chọn sticker";
       const hint = document.createElement("small");
-      hint.textContent = "Chọn từ lịch sử hoặc mục yêu thích bên dưới";
+      hint.textContent = "Đồng bộ từ thư viện sticker trong Tin nhắn";
       copy.append(name, hint);
       automationStickerSelected.replaceChildren(placeholder, copy);
       automationStickerStatus.textContent = "Chưa chọn";
@@ -2081,18 +2092,27 @@
   function renderAutomationStickers() {
     if (!automationStickers) return;
     cleanupLibraryImages(automationStickers);
-    if (!state.stickerCatalog.length) {
+    const selectedKey = state.automationSticker
+      ? stickerKey(state.automationSticker)
+      : "";
+    const sharedStickers = state.stickerCatalog.filter(
+      (item) => state.stickerFavoriteKeys.has(stickerKey(item)),
+    );
+    if (
+      state.automationSticker
+      && !sharedStickers.some((item) => stickerKey(item) === selectedKey)
+    ) {
+      sharedStickers.unshift(state.automationSticker);
+    }
+    if (!sharedStickers.length) {
       const empty = document.createElement("div");
       empty.className = "zchat-list-empty";
-      empty.textContent = "Chưa có sticker trong lịch sử ZChat.";
+      empty.textContent = "Chưa có sticker trong thư viện Tin nhắn.";
       automationStickers.replaceChildren(empty);
       renderAutomationStickerSelection();
       return;
     }
-    const selectedKey = state.automationSticker
-      ? stickerKey(state.automationSticker)
-      : "";
-    const nodes = state.stickerCatalog.slice(0, 60).map((item) => {
+    const nodes = sharedStickers.slice(0, 60).map((item) => {
       const sticker = normalizedSticker(item);
       const button = document.createElement("button");
       button.type = "button";
