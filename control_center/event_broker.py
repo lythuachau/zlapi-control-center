@@ -9,7 +9,7 @@ from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.exc import TimeoutError as SATimeoutError
 
 from .db import Database
-from .models import Event
+from .models import Event, utc_isoformat
 
 logger = logging.getLogger("zlapi.event_broker")
 DATABASE_RETRY_INITIAL_SECONDS = 1.0
@@ -52,7 +52,7 @@ class EventBroker:
                     "event_type": event.event_type,
                     "thread_id": event.thread_id,
                     "payload": event.payload,
-                    "created_at": event.created_at.isoformat(),
+                    "created_at": utc_isoformat(event.created_at),
                 }
                 for event in rows
             ]

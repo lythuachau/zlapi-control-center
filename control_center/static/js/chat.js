@@ -14,13 +14,22 @@
   const FIXED_LIST_VIRTUAL_THRESHOLD = 60;
   const FIXED_LIST_OVERSCAN = 8;
   const SELECTED_ACCOUNT_STORAGE_KEY = "zlapi-chat-selected-account-id";
+  const VIETNAM_TIME_ZONE = "Asia/Ho_Chi_Minh";
   const timeFormatter = new Intl.DateTimeFormat("vi-VN", {
     hour: "2-digit",
     minute: "2-digit",
+    timeZone: VIETNAM_TIME_ZONE,
   });
   const dateFormatter = new Intl.DateTimeFormat("vi-VN", {
     day: "2-digit",
     month: "2-digit",
+    timeZone: VIETNAM_TIME_ZONE,
+  });
+  const dateKeyFormatter = new Intl.DateTimeFormat("en-CA", {
+    day: "2-digit",
+    month: "2-digit",
+    year: "numeric",
+    timeZone: VIETNAM_TIME_ZONE,
   });
   const state = {
     accountId: "",
@@ -468,12 +477,18 @@
     }
   }
 
+  function parseTimestamp(value) {
+    if (typeof value !== "string") return new Date(value);
+    const normalized = /(?:Z|[+-]\d{2}:?\d{2})$/i.test(value) ? value : `${value}Z`;
+    return new Date(normalized);
+  }
+
   function formatTime(value) {
     if (!value) return "—";
-    const date = new Date(value);
+    const date = parseTimestamp(value);
     if (Number.isNaN(date.getTime())) return "—";
     const today = new Date();
-    if (date.toDateString() === today.toDateString()) {
+    if (dateKeyFormatter.format(date) === dateKeyFormatter.format(today)) {
       return timeFormatter.format(date);
     }
     return dateFormatter.format(date);
@@ -2517,13 +2532,14 @@
 
   function taskTimestamp(value) {
     if (!value) return "—";
-    const date = new Date(value);
+    const date = parseTimestamp(value);
     if (Number.isNaN(date.getTime())) return "—";
     return new Intl.DateTimeFormat("vi-VN", {
       day: "2-digit",
       month: "2-digit",
       hour: "2-digit",
       minute: "2-digit",
+      timeZone: VIETNAM_TIME_ZONE,
     }).format(date);
   }
 
@@ -3790,7 +3806,7 @@
       const existing = new Set(state.messages.map((message) => String(message.id)));
       const uniqueOlder = older.filter((message) => !existing.has(String(message.id)));
       const merged = [...uniqueOlder, ...state.messages].sort(
-        (left, right) => new Date(left.created_at) - new Date(right.created_at),
+        (left, right) => parseTimestamp(left.created_at) - parseTimestamp(right.created_at),
       );
       const nextCursor = oldestEventId(uniqueOlder);
       state.messagePagination = {
@@ -4199,7 +4215,11 @@
       pinDetailRow("Người gửi", message?.author_name || pin.author_name || "—"),
       pinDetailRow(
         "Thời gian gửi",
-        message?.created_at ? new Date(message.created_at).toLocaleString("vi-VN") : "—",
+        message?.created_at
+          ? parseTimestamp(message.created_at).toLocaleString("vi-VN", {
+              timeZone: VIETNAM_TIME_ZONE,
+            })
+          : "—",
       ),
       pinDetailRow("Thời gian ghim", pinTimestamp(pin.pinned_at)),
       pinDetailRow("Loại nội dung", message?.kind || pin.message_type || "—"),
@@ -4305,8 +4325,10 @@
     if (typeof normalized === "number" && normalized > 0 && normalized < 100000000000) {
       normalized *= 1000;
     }
-    const date = new Date(normalized);
-    return Number.isNaN(date.getTime()) ? "—" : date.toLocaleString("vi-VN");
+    const date = parseTimestamp(normalized);
+    return Number.isNaN(date.getTime())
+      ? "—"
+      : date.toLocaleString("vi-VN", { timeZone: VIETNAM_TIME_ZONE });
   }
 
   function openGroupNoteDetails(note) {
@@ -5362,18 +5384,18 @@
 
   function matchingOptimisticEcho(message) {
     if (!message.mine || !message.event_id) return null;
-    const createdAt = new Date(message.created_at).getTime();
+    const createdAt = parseTimestamp(message.created_at).getTime();
     return state.messages
       .filter((candidate) => (
         candidate.job_id &&
         candidate.mine &&
         candidate.kind === message.kind &&
         candidate.text === message.text &&
-        Math.abs(new Date(candidate.created_at).getTime() - createdAt) < 5 * 60 * 1000
+        Math.abs(parseTimestamp(candidate.created_at).getTime() - createdAt) < 5 * 60 * 1000
       ))
       .sort((left, right) => (
-        Math.abs(new Date(left.created_at).getTime() - createdAt) -
-        Math.abs(new Date(right.created_at).getTime() - createdAt)
+        Math.abs(parseTimestamp(left.created_at).getTime() - createdAt) -
+        Math.abs(parseTimestamp(right.created_at).getTime() - createdAt)
       ))[0] || null;
   }
 
@@ -5410,7 +5432,7 @@
 
     if (!changes) return 0;
     state.messages.sort(
-      (left, right) => new Date(left.created_at) - new Date(right.created_at),
+      (left, right) => parseTimestamp(left.created_at) - parseTimestamp(right.created_at),
     );
     const empty = $(".zchat-empty", messagesNode);
     if (empty) messagesNode.replaceChildren();
@@ -5921,7 +5943,12 @@
     details.replaceChildren();
     const rows = [
       ["Người gửi", message.author_name || "—"],
-      ["Thời gian", new Date(message.created_at).toLocaleString("vi-VN")],
+      [
+        "Thời gian",
+        parseTimestamp(message.created_at).toLocaleString("vi-VN", {
+          timeZone: VIETNAM_TIME_ZONE,
+        }),
+      ],
       ["Loại nội dung", message.kind || "text"],
       ["Message ID", message.message_ref?.msg_id || message.id || "—"],
       ["Client message ID", message.message_ref?.cli_msg_id || "—"],

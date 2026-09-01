@@ -9,7 +9,7 @@ from urllib.parse import urlsplit
 from sqlalchemy import desc, or_, select
 from sqlalchemy.orm import Session
 
-from .models import ConversationRead, Event, Job, ZaloAccount
+from .models import ConversationRead, Event, Job, ZaloAccount, utc_isoformat
 from .profiles import cached_profiles
 from .reactions import reaction_catalog, reaction_presentation
 
@@ -533,7 +533,7 @@ def incoming_message(event: Event, account: ZaloAccount) -> dict:
         "undone": False,
         "mine": is_own_author(author_id, account.zalo_uid),
         "status": "received",
-        "created_at": event.created_at.isoformat(),
+        "created_at": utc_isoformat(event.created_at),
     }
 
 
@@ -588,7 +588,7 @@ def outgoing_message(job: Job) -> dict:
         "mine": True,
         "status": job.status,
         "error": job.error,
-        "created_at": job.created_at.isoformat(),
+        "created_at": utc_isoformat(job.created_at),
     }
 
 

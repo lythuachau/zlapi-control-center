@@ -23,6 +23,11 @@ def utcnow() -> datetime:
     return datetime.now(UTC)
 
 
+def utc_isoformat(value: datetime) -> str:
+    aware_value = value if value.tzinfo is not None else value.replace(tzinfo=UTC)
+    return aware_value.astimezone(UTC).isoformat()
+
+
 def new_id() -> str:
     return str(uuid.uuid4())
 

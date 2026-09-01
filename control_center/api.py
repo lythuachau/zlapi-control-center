@@ -76,6 +76,7 @@ from .models import (
     User,
     ZaloAccount,
     ZaloContactProfile,
+    utc_isoformat,
     utcnow,
 )
 from .profiles import (
@@ -325,7 +326,7 @@ def _sticker_snapshot(value: Any, *, last_used_at: Any = None) -> dict | None:
         f"webpc?eid={sticker_id}&size=130"
     )
     used_at = (
-        last_used_at.isoformat()
+        utc_isoformat(last_used_at)
         if hasattr(last_used_at, "isoformat")
         else _contact_text(last_used_at)
     )
